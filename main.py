@@ -13,6 +13,8 @@ Start lokal:  uvicorn main:app --reload   (oder: python main.py)
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import logging
 import math
@@ -20,6 +22,7 @@ import os
 import re
 import sqlite3
 import statistics
+import struct
 import threading
 import time
 from collections import Counter, defaultdict
@@ -27,12 +30,13 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel, Field
 
 # --------------------------------------------------------------------------- #
@@ -41,7 +45,10 @@ from pydantic import BaseModel, Field
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", BASE_DIR / "data"))
 IMG_DIR = DATA_DIR / "img"
+OG_DIR = DATA_DIR / "og"
 DB_PATH = DATA_DIR / "cache.sqlite3"
+PUBLIC_URL = os.getenv("PUBLIC_URL", "").rstrip("/")   # optional, z. B. https://meine-domain.de
+CARD_LANGS = {"de", "fr", "it", "pt"}                     # von YGOPRODeck übersetzte Sprachen
 COMBOS_PATH = Path(os.getenv("COMBOS_PATH", BASE_DIR / "combos.json"))
 
 REFRESH_HOURS = float(os.getenv("REFRESH_HOURS", "6"))
@@ -112,8 +119,11 @@ def db() -> sqlite3.Connection:
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     IMG_DIR.mkdir(parents=True, exist_ok=True)
+    OG_DIR.mkdir(parents=True, exist_ok=True)
     with _db_lock, db() as c:
         c.execute("CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT, updated REAL)")
+        c.execute("CREATE TABLE IF NOT EXISTS cards_i18n (id INTEGER, lang TEXT, name TEXT, desc TEXT, "
+                  "PRIMARY KEY (id, lang))")
         c.execute("CREATE TABLE IF NOT EXISTS cards (name TEXT PRIMARY KEY, id INTEGER, data TEXT)")
         c.execute("CREATE INDEX IF NOT EXISTS cards_id ON cards(id)")
 
@@ -162,6 +172,11 @@ def cards_put(cards: list[dict]) -> None:
 def known_card_names() -> set[str]:
     with _db_lock, db() as c:
         return {r[0] for r in c.execute("SELECT name FROM cards")}
+
+
+def L(lang: str | None, de: str, en: str) -> str:
+    """Mini-Übersetzungshelfer für Backend-Texte."""
+    return en if lang == "en" else de
 
 
 # --------------------------------------------------------------------------- #
@@ -259,6 +274,50 @@ async def fetch_ygo_cards(client: httpx.AsyncClient, *, names: list[str] | None 
         for i in range(0, len(ids), 40):
             await batch("id", [str(x) for x in ids[i:i + 40]])
     return found
+
+
+async def card_translations(ids: list[int], lang: str) -> dict[int, dict]:
+    """Übersetzte Namen/Texte (YGOPRODeck language=de/fr/it/pt), dauerhaft im Cache.
+    Karten ohne Übersetzung werden als leer gemerkt und fallen im Frontend auf Englisch zurück."""
+    ids = sorted({int(i) for i in ids if int(i) > 0})
+    if lang not in CARD_LANGS or not ids:
+        return {}
+    out: dict[int, dict] = {}
+    known: set[int] = set()
+    with _db_lock, db() as c:
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            q = f"SELECT id, name, desc FROM cards_i18n WHERE lang=? AND id IN ({','.join('?' * len(chunk))})"
+            for cid, name, desc in c.execute(q, [lang, *chunk]):
+                known.add(cid)
+                if name:
+                    out[cid] = {"name": name, "desc": desc}
+    missing = [i for i in ids if i not in known]
+    if missing:
+        fetched: dict[int, dict] = {}
+
+        async def batch(client: httpx.AsyncClient, vals: list[int]) -> None:
+            r = await ygo_get(client, YGO_API, {"id": ",".join(map(str, vals)), "language": lang})
+            if r.status_code == 200:
+                for x in r.json().get("data", []):
+                    fetched[int(x["id"])] = {"name": x.get("name"), "desc": x.get("desc")}
+            elif r.status_code == 400 and len(vals) > 1:
+                mid = len(vals) // 2
+                await batch(client, vals[:mid])
+                await batch(client, vals[mid:])
+
+        try:
+            async with httpx.AsyncClient(timeout=60, headers={"User-Agent": USER_AGENT}) as client:
+                for i in range(0, len(missing), 40):
+                    await batch(client, missing[i:i + 40])
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Übersetzungen nicht abrufbar: %r", ex)
+            return out  # nichts als "fehlend" merken, beim nächsten Mal erneut versuchen
+        with _db_lock, db() as c:
+            c.executemany("INSERT OR REPLACE INTO cards_i18n VALUES (?,?,?,?)",
+                          [(i, lang, fetched.get(i, {}).get("name"), fetched.get(i, {}).get("desc")) for i in missing])
+        out.update({i: v for i, v in fetched.items() if v.get("name")})
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -547,10 +606,11 @@ def ratio_table(deck: int = DECK_SIZE) -> list[dict]:
 # --------------------------------------------------------------------------- #
 # Meta-Statistik & Konsens-Deckbau
 # --------------------------------------------------------------------------- #
-def load_meta() -> tuple[list[dict], dict[str, int]]:
+def load_meta(lang: str = "de") -> tuple[list[dict], dict[str, int]]:
     decks = kv_get("decks", []) or []
     if not decks:
-        raise HTTPException(503, "Noch keine Meta-Daten im Cache – Refresh läuft oder ist fehlgeschlagen.")
+        raise HTTPException(503, L(lang, "Noch keine Meta-Daten im Cache – Refresh läuft oder ist fehlgeschlagen.",
+                                   "No meta data cached yet – refresh is running or failed."))
     return decks, kv_get("banlist", {}) or {}
 
 
@@ -611,13 +671,15 @@ class BuildRequest(BaseModel):
     target: float = Field(0.85, ge=0.5, le=0.99)
     hand_size: int = Field(5, ge=5, le=6)
     overrides: dict[str, str] = Field(default_factory=dict)
+    lang: str = "de"
 
 
 def build_deck(req: BuildRequest) -> dict:
-    decks, banlist = load_meta()
+    decks, banlist = load_meta(req.lang)
     arch_decks = [d for d in decks if d["archetype"].lower() == req.archetype.lower()]
     if not arch_decks:
-        raise HTTPException(404, f"Keine Meta-Listen für '{req.archetype}' im Zeitfenster.")
+        raise HTTPException(404, L(req.lang, f"Keine Meta-Listen für '{req.archetype}' im Zeitfenster.",
+                                   f"No meta lists for '{req.archetype}' in the time window."))
     arche = arch_decks[0]["archetype"]
     main_stats = card_stats(arch_decks, "main")
     extra_stats = card_stats(arch_decks, "extra")
@@ -684,7 +746,7 @@ def build_deck(req: BuildRequest) -> dict:
                         and sum(extra.values()) < EXTRA_MAX), None)
             if alt:
                 extra[alt] = extra.get(alt, 0) + 1
-            changes.append({"out": n, "in": alt, "part": "extra", "reason": f"{r}-Budget"})
+            changes.append({"out": n, "in": alt, "part": "extra", "reason": "budget", "rarity": r})
             extra = {k: v for k, v in extra.items() if v > 0}
             continue
         if not main_cands:
@@ -694,13 +756,13 @@ def build_deck(req: BuildRequest) -> dict:
         alt = replacement(role(n), n)
         if alt:
             main[alt] = main.get(alt, 0) + 1
-        changes.append({"out": n, "in": alt, "part": "main", "reason": f"{r}-Budget"})
+        changes.append({"out": n, "in": alt, "part": "main", "reason": "budget", "rarity": r})
         main = {k: v for k, v in main.items() if v > 0}
 
     # Lücken auffüllen (falls Budget-Ersatz nicht für jede Kopie möglich war)
     while sum(main.values()) < DECK_SIZE and (alt := replacement("tech", "")):
         main[alt] = main.get(alt, 0) + 1
-        changes.append({"out": None, "in": alt, "part": "main", "reason": "Auffüllen"})
+        changes.append({"out": None, "in": alt, "part": "main", "reason": "fill"})
 
     # ---------- Konsistenz-Optimierung (Ziel: P(Combo) ≥ target) ----------
     def counts() -> dict[str, int]:
@@ -726,7 +788,7 @@ def build_deck(req: BuildRequest) -> dict:
         main[rem] -= 1
         main[add] = main.get(add, 0) + 1
         main = {k: v for k, v in main.items() if v > 0}
-        changes.append({"out": rem, "in": add, "part": "main", "reason": "Konsistenz"})
+        changes.append({"out": rem, "in": add, "part": "main", "reason": "consistency"})
         swaps += 1
 
     analysis = analyze_counts(counts(), req.hand_size)
@@ -776,58 +838,150 @@ def load_curated() -> dict:
         return {}
 
 
-def build_playbook(arche: str, main: list[dict], extra: list[dict]) -> dict:
-    curated = load_curated().get(arche)
-    starters = sorted([c for c in main if c["role"] == "starter"], key=lambda c: (-c["inclusion"], -c["count"]))
-    extenders = sorted([c for c in main if c["role"] == "extender"], key=lambda c: -c["inclusion"])
-    extra_top = sorted(extra, key=lambda c: -c["inclusion"])[:5]
+def curated_for(arche: str, lang: str) -> dict | None:
+    """combos.json-Eintrag; optional mit Sprach-Unterobjekt, z. B. {"turn1": [...], "en": {"turn1": [...]}}."""
+    data = load_curated()
+    entry = next((v for k, v in data.items() if k.lower() == arche.lower() and isinstance(v, dict)), None)
+    if not entry:
+        return None
+    merged = {k: v for k, v in entry.items() if k not in ("de", "en")}
+    if isinstance(entry.get(lang), dict):
+        merged.update(entry[lang])
+    return merged if merged.get("turn1") or merged.get("chokepoints") or merged.get("notes") else None
+
+
+# ---------- Kombo-Baum: "Wer holt wen?" direkt aus den Kartentexten ----------
+_ACTIONS = [
+    ("search", re.compile(r"add (?:1|one|up to \w+|\w+)\s+(.{1,120}?)\s+from your ([^.;]*?)\s*to your hand", re.I)),
+    ("summon", re.compile(r"special summon (?:1|one|up to \w+)\s+(.{1,120}?)\s+from your ([^.;]*?)(?:[,.;]|\s+in\s|\s+to\s|$)", re.I)),
+    ("send", re.compile(r"send (?:1|one|up to \w+)\s+(.{1,120}?)\s+from your ([^.;]*?)\s*to the GY", re.I)),
+]
+_QUOTE = re.compile(r'"([^"]{2,60})"')
+
+
+def _kind_ok(phrase: str, card: dict) -> bool:
+    p, t = phrase.lower(), (card.get("type") or "")
+    if re.search(r"\bspell\b", p) and "Spell" not in t:
+        return False
+    if re.search(r"\btrap\b", p) and "Trap" not in t:
+        return False
+    if re.search(r"\bmonsters?\b", p) and "Monster" not in t:
+        return False
+    return True
+
+
+def combo_graph(main: list[dict], extra: list[dict]) -> dict:
+    """Kanten: Karte A kann Karte B suchen / beschwören / auf den Friedhof legen (nur Karten im Deck)."""
+    pool = {c["name"]: c for c in main + extra}
+    edges: dict[str, list[dict]] = {}
+    for c in main + extra:
+        desc = c.get("desc") or ""
+        seen: set[tuple[str, str]] = set()
+        for action, rx in _ACTIONS:
+            for m in rx.finditer(desc):
+                phrase, source = m.group(1), m.group(2).lower()
+                if "opponent" in source:
+                    continue
+                if "except" in phrase.lower():
+                    head, tail = re.split(r"except", phrase, maxsplit=1, flags=re.I)
+                    excluded = set(_QUOTE.findall(tail))
+                else:
+                    head, excluded = phrase, set()
+                quoted = _QUOTE.findall(head)
+                if not quoted:
+                    continue
+                from_extra = "extra deck" in source
+                for t in pool.values():
+                    if t["name"] in excluded or (t["name"] == c["name"] and t["name"] not in quoted):
+                        continue
+                    if from_extra and not is_extra_card(t):
+                        continue
+                    if not from_extra and is_extra_card(t) and "gy" not in source:
+                        continue  # Extra-Deck-Monster nur aus Extra Deck oder Friedhof
+                    hit = any(q == t["name"] or q.lower() in t["name"].lower()
+                              or q.lower() == (t.get("archetype") or "").lower() for q in quoted)
+                    if hit and _kind_ok(head, t) and (action, t["name"]) not in seen:
+                        seen.add((action, t["name"]))
+                        edges.setdefault(c["name"], []).append({"to": t["name"], "action": action})
+    return edges
+
+
+def combo_lines(main: list[dict], edges: dict[str, list[dict]], limit: int = 6) -> list[dict]:
+    """Baum je Starter (2 Ebenen), sortiert nach Bedeutung in der Meta."""
+    weight = {c["name"]: c.get("inclusion", 0) * 3 + c.get("count", 0) for c in main}
+    roots = sorted([c for c in main if c["role"] in ("starter", "extender") and edges.get(c["name"])],
+                   key=lambda c: (c["role"] != "starter", -weight.get(c["name"], 0)))[:limit]
+    trees = []
+    for r in roots:
+        kids = sorted(edges[r["name"]], key=lambda e: -weight.get(e["to"], 0))[:6]
+        trees.append({"card": r["name"], "children": [
+            {**k, "children": [e for e in edges.get(k["to"], []) if e["to"] != r["name"]][:4]} for k in kids]})
+    return trees
+
+
+def build_playbook(arche: str, main: list[dict], extra: list[dict], lang: str = "de") -> dict:
+    curated = curated_for(arche, lang)
+    starters = sorted([c for c in main if c["role"] == "starter"], key=lambda c: (-c.get("inclusion", 0), -c["count"]))
+    extenders = sorted([c for c in main if c["role"] == "extender"], key=lambda c: -c.get("inclusion", 0))
+    extra_top = sorted(extra, key=lambda c: -c.get("inclusion", 0))[:5]
+    edges = combo_graph(main, extra)
 
     steps: list[dict] = []
     if curated and curated.get("turn1"):
         steps = [{"text": s, "card": None} for s in curated["turn1"]]
-        source = "kuratiert (combos.json)"
+        source = "curated"
     else:
-        source = "automatisch erzeugtes Gerüst – Reihenfolge vor Turnier-Einsatz testen"
+        source = "auto"
         monsters = [c for c in starters if "Monster" in c["type"]]
         spells = [c for c in starters if "Spell" in c["type"]]
-        for c in spells[:1]:
-            steps.append({"card": c["name"], "text": f"Aktiviere {c['name']}: "
-                          + (first_clause(c["desc"], RE_SEARCH) or "Suche/Setup-Effekt") })
-        for c in monsters[:1]:
-            clause = first_clause(c["desc"], RE_SEARCH) or first_clause(c["desc"], RE_SS_DECK)
-            steps.append({"card": c["name"], "text": f"Normalbeschwörung: {c['name']} → {clause or 'Effekt aktivieren'}"})
-        for c in monsters[1:2]:
-            steps.append({"card": c["name"], "text": f"Hole bzw. nutze {c['name']} als zweiten Starter: "
-                          + (first_clause(c["desc"], RE_SEARCH) or first_clause(c["desc"], RE_SS_DECK) or "Effekt aktivieren")})
-        for c in extenders[:2]:
-            steps.append({"card": c["name"], "text": f"Spezialbeschwörung: {c['name']} → "
-                          + (first_clause(c["desc"], RE_SELF_SS) or "als Material verwenden")})
-        if extra_top:
-            steps.append({"card": extra_top[0]["name"], "text": "Materialien in die Extra-Deck-Ziele überführen: "
-                          + ", ".join(f"{c['name']} ({round(c['inclusion'] * 100)}% der Listen)" for c in extra_top)})
-        steps.append({"card": None, "text": "Endboard: Negationen/Unterbrechungen aufbauen, Hand-Interaktion für den Gegnerzug halten."})
 
-    # Chokepoints: wo greifen Ash / Imperm / Veiler / Maxx "C"?
+        def targets(name: str) -> str:
+            ts = [e["to"] for e in edges.get(name, [])][:3]
+            return (" (" + L(lang, "z. B. ", "e.g. ") + ", ".join(ts) + ")") if ts else ""
+
+        for c in spells[:1]:
+            steps.append({"card": c["name"], "text": L(lang, f"Aktiviere {c['name']} und hole den passenden Combo-Teil",
+                                                        f"Activate {c['name']} and fetch the right combo piece") + targets(c["name"])})
+        for c in monsters[:1]:
+            steps.append({"card": c["name"], "text": L(lang, f"Normalbeschwörung: {c['name']} → Effekt nutzen",
+                                                        f"Normal Summon {c['name']} → use its effect") + targets(c["name"])})
+        for c in monsters[1:2]:
+            steps.append({"card": c["name"], "text": L(lang, f"{c['name']} als zweiten Starter nutzen",
+                                                        f"Use {c['name']} as the second starter") + targets(c["name"])})
+        for c in extenders[:2]:
+            steps.append({"card": c["name"], "text": L(lang, f"Spezialbeschwörung: {c['name']} als zusätzliches Material",
+                                                        f"Special Summon {c['name']} as extra material")})
+        if extra_top:
+            steps.append({"card": extra_top[0]["name"], "text": L(lang, "Extra-Deck-Ziele laut Meta-Listen: ", "Extra Deck targets from meta lists: ")
+                          + ", ".join(f"{c['name']} ({round(c.get('inclusion', 0) * 100)}%)" for c in extra_top)})
+        steps.append({"card": None, "text": L(lang, "Endboard: Unterbrechungen aufbauen und Hand-Interaktion für den Gegnerzug halten.",
+                                              "End board: set up interruptions and keep hand interaction for your opponent's turn.")})
+
     chokes = []
     for c in (starters + extenders)[:8]:
-        d = c["desc"]
+        d = c.get("desc") or ""
         ash = bool(RE_SEARCH.search(d) or RE_SS_DECK.search(d) or RE_SEND_DECK.search(d))
         on_field = "Monster" in c["type"] and "discard this card" not in d.lower()
-        chokes.append({
-            "card": c["name"], "ash": ash, "imperm": on_field, "role": c["role"],
-            "tip": ("Ash Blossom trifft den Deck-Zugriff – mit Called by the Grave/Crossout schützen oder "
-                    "zuerst einen weniger wichtigen Starter als Köder ausspielen." if ash else
-                    "Effekt wird auf dem Feld aktiviert – anfällig für Infinite Impermanence/Effect Veiler; "
-                    "nach Möglichkeit erst nach dem Auflösen der Handtraps beschwören." if on_field else
-                    "Kein typischer Handtrap-Chokepoint."),
-        })
-    protection = [c["name"] for c in main if c["name"] in PROTECTION]
-    maxx = {"text": "Maxx \"C\" / Mulcharmy: Nach der Auflösung entscheiden, ob ein kleineres Board "
-                    "(≤ 4 Spezialbeschwörungen) reicht. Kombos mit vielen Beschwörungen nicht blind durchspielen."}
+        tip = (L(lang, "Ash Blossom trifft den Deck-Zugriff – mit Called by the Grave/Crossout schützen oder zuerst einen weniger wichtigen Starter als Köder ausspielen.",
+                 "Ash Blossom hits the deck access – protect it with Called by the Grave/Crossout or bait with a less important starter first.") if ash else
+               L(lang, "Effekt wird auf dem Feld aktiviert – anfällig für Infinite Impermanence/Effect Veiler; erst nach den Handtraps des Gegners beschwören, wenn möglich.",
+                 "Effect activates on the field – vulnerable to Infinite Impermanence/Effect Veiler; summon it after the opponent's hand traps if possible.") if on_field else
+               L(lang, "Kein typischer Handtrap-Chokepoint.", "Not a typical hand trap chokepoint."))
+        chokes.append({"card": c["name"], "ash": ash, "imperm": on_field, "role": c["role"], "tip": tip})
     if curated and curated.get("chokepoints"):
         chokes = [{"card": None, "ash": None, "imperm": None, "role": "", "tip": t} for t in curated["chokepoints"]] + chokes
-    return {"archetype": arche, "source": source, "turn1": steps, "chokepoints": chokes,
-            "protection_in_deck": protection, "maxx_c": maxx, "notes": (curated or {}).get("notes", "")}
+    return {
+        "archetype": arche, "source": source, "turn1": steps, "chokepoints": chokes,
+        "graph": combo_lines(main, edges),
+        "protection_in_deck": [c["name"] for c in main if c["name"] in PROTECTION],
+        "maxx_c": {"text": L(lang, "Maxx \"C\" / Mulcharmy: Nach dem Auflösen entscheiden, ob ein kleineres Board (≤ 4 Spezialbeschwörungen) reicht – nicht blind durchkombieren.",
+                             "Maxx \"C\" / Mulcharmy: once it resolves, decide whether a smaller board (≤ 4 Special Summons) is enough – don't blindly combo through.")},
+        "notes": (curated or {}).get("notes", ""),
+        "links": {
+            "mdm": "https://www.masterduelmeta.com/tier-list/deck-types/" + quote(arche, safe=""),
+            "youtube": "https://www.youtube.com/results?search_query=" + quote(f"Master Duel {arche} combo", safe=""),
+        },
+    }
 
 
 async def ask_claude(prompt: str, max_tokens: int = 1600) -> str | None:
@@ -859,7 +1013,7 @@ def deck_prompt_block(main: list[dict], extra: list[dict]) -> str:
 LINE_RE = re.compile(r"^\s*(?:(\d+)\s*[xX×]?\s+(.+?)|(.+?)\s+[xX×]\s*(\d+))\s*$")
 
 
-async def parse_decklist(text: str) -> tuple[dict[str, int], dict[str, int], list[str]]:
+async def parse_decklist(text: str, lang: str = "de") -> tuple[dict[str, int], dict[str, int], list[str]]:
     main: Counter = Counter()
     extra: Counter = Counter()
     warnings: list[str] = []
@@ -890,7 +1044,7 @@ async def parse_decklist(text: str) -> tuple[dict[str, int], dict[str, int], lis
                 if cid in known:
                     target[known[cid]["name"]] += n
                 else:
-                    warnings.append(f"Unbekannte Karten-ID {cid} ignoriert")
+                    warnings.append(L(lang, f"Unbekannte Karten-ID {cid} ignoriert", f"Unknown card ID {cid} ignored"))
         return dict(main), dict(extra), warnings
 
     section = "main"
@@ -919,7 +1073,7 @@ async def parse_decklist(text: str) -> tuple[dict[str, int], dict[str, int], lis
         known.update({c["name"]: c for c in fetched})
     for n in missing:
         if n not in known:
-            warnings.append(f"Karte nicht gefunden (Schreibweise prüfen): {n}")
+            warnings.append(L(lang, f"Karte nicht gefunden (Schreibweise prüfen): {n}", f"Card not found (check spelling): {n}"))
     # Extra-Deck-Karten, die versehentlich im Main stehen, verschieben
     for n in list(main):
         if n in known and is_extra_card(known[n]):
@@ -933,13 +1087,16 @@ class DoctorRequest(BaseModel):
     hand_size: int = Field(5, ge=5, le=6)
     overrides: dict[str, str] = Field(default_factory=dict)
     ai: bool = False
+    lang: str = "de"
 
 
 async def deck_doctor(req: DoctorRequest) -> dict:
-    decks, banlist = load_meta()
-    main, extra, warnings = await parse_decklist(req.text)
+    lg = req.lang
+    decks, banlist = load_meta(lg)
+    main, extra, warnings = await parse_decklist(req.text, lg)
     if not main:
-        raise HTTPException(400, "Keine Karten erkannt. Format: YDK oder Zeilen wie '3 Ash Blossom & Joyous Spring'.")
+        raise HTTPException(400, L(lg, "Keine Karten erkannt. Format: YDK oder Zeilen wie '3 Ash Blossom & Joyous Spring'.",
+                                   "No cards recognised. Format: YDK or lines like '3 Ash Blossom & Joyous Spring'."))
 
     # Archetyp automatisch erkennen (größte Überschneidung mit Meta-Listen)
     archetypes = {d["archetype"] for d in decks}
@@ -969,35 +1126,41 @@ async def deck_doctor(req: DoctorRequest) -> dict:
         findings.append({"severity": sev, "text": text})
 
     if size < 40:
-        add("error", f"Main Deck hat nur {size} Karten (Minimum 40).")
+        add("error", L(lg, f"Main Deck hat nur {size} Karten (Minimum 40).", f"Main Deck has only {size} cards (minimum 40)."))
     elif size > 40:
-        add("warn", f"Main Deck hat {size} Karten – jede Karte über 40 senkt die Starter-Chance.")
+        add("warn", L(lg, f"Main Deck hat {size} Karten – jede Karte über 40 senkt die Starter-Chance.",
+                      f"Main Deck has {size} cards – every card above 40 lowers your starter odds."))
     if sum(extra.values()) > EXTRA_MAX:
-        add("error", f"Extra Deck hat {sum(extra.values())} Karten (Maximum 15).")
+        add("error", L(lg, f"Extra Deck hat {sum(extra.values())} Karten (Maximum 15).", f"Extra Deck has {sum(extra.values())} cards (maximum 15)."))
     for n, c in {**main, **extra}.items():
         cap = cap_for(n, banlist)
         if c > cap:
-            add("error", f"{n}: {c} Kopien, erlaubt sind {cap} (Banliste/Regel).")
+            add("error", L(lg, f"{n}: {c} Kopien, erlaubt sind {cap} (Banliste/Regel).", f"{n}: {c} copies, {cap} allowed (banlist/rules)."))
     if analysis["p_combo"] < 0.85:
         need = min_starters(0.85, max(size, 40), req.hand_size)
-        add("warn", f"Combo-Chance nur {analysis['p_combo']:.1%} – für 85 % (1-Karten-Starter) werden ca. "
-                    f"{need} Starter bei {max(size, 40)} Karten benötigt, aktuell {counts['starter']}.")
+        add("warn", L(lg, f"Combo-Chance nur {analysis['p_combo']:.1%} – für 85 % (1-Karten-Starter) werden ca. "
+                          f"{need} Starter bei {max(size, 40)} Karten benötigt, aktuell {counts['starter']}.",
+                          f"Combo odds only {analysis['p_combo']:.1%} – 85 % (1-card starters) needs about "
+                          f"{need} starters in {max(size, 40)} cards, you have {counts['starter']}."))
     else:
-        add("ok", f"Combo-Chance {analysis['p_combo']:.1%} – Konsistenzziel erreicht.")
+        add("ok", L(lg, f"Combo-Chance {analysis['p_combo']:.1%} – Konsistenzziel erreicht.",
+                    f"Combo odds {analysis['p_combo']:.1%} – consistency target reached."))
 
     plus = [(n, s) for n, s in sorted(st.items(), key=lambda x: -x[1]["inclusion"] * x[1]["median"])
             if s["inclusion"] >= 0.6 and main.get(n, 0) < s["median"]]
     for n, s in plus[:8]:
-        add("suggest", f"+ {n}: in {s['inclusion']:.0%} der {arche}-Listen (meist {s['median']:g}x), "
-                       f"bei dir {main.get(n, 0)}x.")
+        add("suggest", L(lg, f"+ {n}: in {s['inclusion']:.0%} der {arche}-Listen (meist {s['median']:g}x), bei dir {main.get(n, 0)}x.",
+                         f"+ {n}: in {s['inclusion']:.0%} of {arche} lists (usually {s['median']:g}x), you have {main.get(n, 0)}x."))
     minus = sorted((n for n in main if st.get(n, {}).get("inclusion", 0) < 0.1
                     and gst.get(n, {}).get("inclusion", 0) < 0.15), key=lambda n: st.get(n, {}).get("inclusion", 0))
     for n in minus[:6]:
-        add("suggest", f"− {n}: kaum gespielt (in {st.get(n, {}).get('inclusion', 0):.0%} der {arche}-Listen) – Ersatz prüfen.")
+        add("suggest", L(lg, f"− {n}: kaum gespielt (in {st.get(n, {}).get('inclusion', 0):.0%} der {arche}-Listen) – Ersatz prüfen.",
+                         f"− {n}: rarely played (in {st.get(n, {}).get('inclusion', 0):.0%} of {arche} lists) – consider replacing."))
     ht = sum(c for n, c in main.items() if role(n) == "handtrap")
     avg_ht = statistics.mean(sum(e["amount"] for e in d["main"] if e["name"] in HANDTRAPS) for d in arch_decks)
     if ht + 2 < avg_ht:
-        add("suggest", f"Nur {ht} Handtraps – {arche}-Listen spielen im Schnitt {avg_ht:.1f}.")
+        add("suggest", L(lg, f"Nur {ht} Handtraps – {arche}-Listen spielen im Schnitt {avg_ht:.1f}.",
+                         f"Only {ht} hand traps – {arche} lists play {avg_ht:.1f} on average."))
 
     penalty = sum({"error": 15, "warn": 8, "suggest": 3}.get(f["severity"], 0) for f in findings)
     score = max(0, min(100, round(analysis["p_combo"] * 100) - penalty + 15))
@@ -1009,7 +1172,7 @@ async def deck_doctor(req: DoctorRequest) -> dict:
         meta = "\n".join(f"{n}: {s['inclusion']:.0%} Inklusion, Median {s['median']:g}x"
                          for n, s in sorted(st.items(), key=lambda x: -x[1]["inclusion"])[:35])
         ai_text = await ask_claude(
-            f"Du bist ein Yu-Gi-Oh! Master Duel Deck-Coach. Antworte auf Deutsch, knapp und konkret.\n"
+            f"Du bist ein Yu-Gi-Oh! Master Duel Deck-Coach. Antworte auf {L(lg, 'Deutsch', 'Englisch')}, knapp und konkret.\n"
             f"Archetyp: {arche}. Combo-Chance {analysis['p_combo']:.1%}.\n"
             f"Meta-Statistik (MDM-Top-Decks, letzte {META_WINDOW_DAYS} Tage):\n{meta}\n\n"
             f"Deck des Nutzers:\n{deck_prompt_block(cards, xc)}\n\n"
@@ -1026,6 +1189,198 @@ async def deck_doctor(req: DoctorRequest) -> dict:
                      "extra": [{"name": n, "count": c, "id": info.get(n, {}).get("id", 0), "role": "extra",
                                 "rarity": info.get(n, {}).get("rarity", "?"), "desc": info.get(n, {}).get("desc", ""),
                                 "type": info.get(n, {}).get("type", "")} for n, c in extra.items()]}}
+
+
+# --------------------------------------------------------------------------- #
+# Teilen: Deck-Code im Link + Vorschaubild (Open Graph) – ohne Datenbank,
+# damit geteilte Links auch nach einem Neustart (Render Free) funktionieren.
+# --------------------------------------------------------------------------- #
+def _b64e(b: bytes) -> str:
+    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+
+
+def _b64d(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+
+def encode_share(arche: str, main: dict[int, int], extra: dict[int, int]) -> str:
+    pack = lambda d: b"".join(struct.pack("<IB", i, n) for i, n in sorted(d.items()))  # noqa: E731
+    return f"{_b64e(arche.encode()[:80])}.{_b64e(pack(main))}.{_b64e(pack(extra))}"
+
+
+def decode_share(code: str) -> tuple[str, dict[int, int], dict[int, int]]:
+    try:
+        if len(code) > 1500:
+            raise ValueError
+        a, m, e = code.split(".")
+        arche = _b64d(a).decode()[:80] if a else "Deck"
+
+        def unpack(s: str, max_total: int) -> dict[int, int]:
+            raw = _b64d(s) if s else b""
+            if len(raw) % 5:
+                raise ValueError
+            out = {struct.unpack("<I", raw[i:i + 4])[0]: raw[i + 4] for i in range(0, len(raw), 5)}
+            if any(n < 1 or n > 3 for n in out.values()) or sum(out.values()) > max_total:
+                raise ValueError
+            return out
+        return arche, unpack(m, 60), unpack(e, 15)
+    except Exception:
+        raise HTTPException(400, "Invalid deck code")
+
+
+async def shared_deck(code: str, lang: str = "de", hand_size: int = 5) -> dict:
+    arche, main_ids, extra_ids = decode_share(code)
+    ids = list(set(main_ids) | set(extra_ids))
+    known = cards_by_ids(ids)
+    missing = [i for i in ids if i not in known]
+    if missing:
+        try:
+            async with httpx.AsyncClient(timeout=60, headers={"User-Agent": USER_AGENT}) as client:
+                fetched = await fetch_ygo_cards(client, ids=missing)
+            cards_put(fetched)
+            known.update({c["id"]: c for c in fetched})
+        except Exception as ex:  # noqa: BLE001
+            log.warning("Karten für geteiltes Deck nicht abrufbar: %r", ex)
+    decks = kv_get("decks", []) or []
+    banlist = kv_get("banlist", {}) or {}
+    arch_decks = [d for d in decks if d["archetype"].lower() == arche.lower()]
+    mst = card_stats(arch_decks, "main") if arch_decks else {}
+    est = card_stats(arch_decks, "extra") if arch_decks else {}
+
+    def out(cid: int, n: int, part: str) -> dict:
+        c = known.get(cid, {"id": cid, "name": f"#{cid}", "type": "", "desc": "", "rarity": "?"})
+        st = (mst if part == "main" else est).get(c["name"], {})
+        return {"name": c["name"], "count": n, "id": cid, "rarity": c.get("rarity", "?"), "type": c.get("type", ""),
+                "desc": c.get("desc", ""), "frame": c.get("frame", ""),
+                "role": "extra" if part == "extra" else role_of(c, {}, arche),
+                "inclusion": round(st.get("inclusion", 0), 3), "ban": banlist.get(c["name"])}
+
+    main = sorted((out(i, n, "main") for i, n in main_ids.items()),
+                  key=lambda x: (ROLE_ORDER.index(x["role"]), -x["inclusion"], x["name"]))
+    extra = sorted((out(i, n, "extra") for i, n in extra_ids.items()), key=lambda x: (-x["inclusion"], x["name"]))
+    counts = Counter()
+    for c in main:
+        counts[to_cat(c["role"])] += c["count"]
+    analysis = analyze_counts(dict(counts), hand_size)
+    size = sum(c["count"] for c in main)
+    return {
+        "archetype": arche, "shared": True, "code": code, "sample_size": len(arch_decks),
+        "main": main, "extra": extra, "analysis": analysis, "target": 0.85,
+        "target_reached": analysis["p_combo"] >= 0.85, "missing_slots": max(0, DECK_SIZE - size),
+        "min_starters_one_card": min_starters(0.85, max(size, DECK_SIZE), hand_size),
+        "meta_avg_handtraps": round(statistics.mean(sum(e["amount"] for e in d["main"] if e["name"] in HANDTRAPS)
+                                                    for d in arch_decks), 1) if arch_decks else None,
+        "cp": cp_usage({c["name"]: c["count"] for c in main}, {c["name"]: c["count"] for c in extra},
+                       {c["name"]: c for c in main + extra}),
+        "changes": [], "sources": [],
+    }
+
+
+_img_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+async def ensure_image(card_id: int) -> Path | None:
+    """Lädt ein Kartenbild genau einmal von YGOPRODeck (Hotlink-Regel) und liefert den lokalen Pfad."""
+    path = IMG_DIR / f"{card_id}.jpg"
+    if path.exists():
+        return path
+    async with _img_locks[card_id]:
+        if path.exists():
+            return path
+        try:
+            async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}) as client:
+                r = await ygo_get(client, YGO_IMG.format(id=card_id))
+        except Exception:  # noqa: BLE001
+            return None
+        if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image"):
+            return None
+        tmp = path.with_suffix(".tmp")
+        tmp.write_bytes(r.content)
+        tmp.replace(path)
+    return path
+
+
+def _font(size: int, bold: bool = True):
+    from PIL import ImageFont
+    names = ["DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"]
+    for n in names:
+        try:
+            return ImageFont.truetype(n, size)
+        except Exception:  # noqa: BLE001
+            continue
+    try:
+        return ImageFont.load_default(size=size)  # Pillow ≥ 10.1: skalierbare Standardschrift
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def render_og(deck: dict, lang: str, path: Path) -> None:
+    from PIL import Image, ImageDraw, ImageFilter
+    W, H = 1200, 630
+    img = Image.new("RGB", (W, H), (5, 7, 15))
+    glow = Image.new("RGB", (W, H), (0, 0, 0))
+    g = ImageDraw.Draw(glow)
+    g.ellipse((-200, -300, 600, 300), fill=(20, 110, 130))
+    g.ellipse((800, -200, 1500, 350), fill=(90, 40, 140))
+    img = Image.blend(img, glow.filter(ImageFilter.GaussianBlur(120)), 0.55)
+    d = ImageDraw.Draw(img)
+    cyan, violet, gold, rose, white, grey = (34, 211, 238), (168, 85, 247), (245, 197, 66), (244, 63, 94), (241, 245, 249), (148, 163, 184)
+
+    d.text((60, 44), "MD META FORGE", font=_font(26), fill=cyan)
+    title = deck["archetype"]
+    f = _font(64)
+    while d.textlength(title, font=f) > 1080 and len(title) > 4:
+        title = title[:-2]
+    d.text((60, 84), title if title == deck["archetype"] else title + "…", font=f, fill=white)
+
+    a = deck["analysis"]
+    stats = [(L(lang, "Combo-Chance", "Combo odds"), fmt_pct(a['p_combo'], lang), cyan),
+             (L(lang, "Brick-Risiko", "Brick risk"), fmt_pct(a['tiers']['Brick'], lang), rose),
+             (L(lang, "Interaktion", "Interaction"), fmt_pct(a['p_interaction'], lang), violet),
+             ("Starter", str(a["counts"]["starter"]), gold)]
+    x = 60
+    for label, val, col in stats:
+        d.rounded_rectangle((x, 180, x + 255, 300), radius=18, fill=(13, 22, 45), outline=col, width=2)
+        d.text((x + 20, 194), label, font=_font(22, False), fill=grey)
+        d.text((x + 20, 228), val, font=_font(48), fill=col)
+        x += 275
+
+    cards = sorted(deck["main"], key=lambda c: (c["role"] not in ("starter", "extender"), -c["count"], -c.get("inclusion", 0)))[:7]
+    x, y, cw, ch = 60, 330, 152, 222
+    for c in cards:
+        p = IMG_DIR / f"{c['id']}.jpg"
+        try:
+            thumb = Image.open(p).convert("RGB").resize((cw, ch))
+            img.paste(thumb, (x, y))
+        except Exception:  # noqa: BLE001
+            d.rounded_rectangle((x, y, x + cw, y + ch), radius=8, fill=(30, 41, 59))
+            d.multiline_text((x + 8, y + 8), "\n".join(re.findall(r".{1,14}(?:\s|$)", c["name"]))[:80], font=_font(16, False), fill=white)
+        if c["count"] > 1:
+            d.ellipse((x + cw - 34, y - 10, x + cw + 4, y + 28), fill=(5, 7, 15), outline=cyan, width=2)
+            d.text((x + cw - 15, y + 9), str(c["count"]), font=_font(20), fill=white, anchor="mm")
+        x += cw + 10
+    d.text((60, 584), L(lang, "Deckliste, Testhand & Export: Link öffnen", "Decklist, test hand & export: open the link"),
+           font=_font(22, False), fill=grey)
+    tmp = path.with_suffix(".tmp.png")
+    img.save(tmp, "PNG", optimize=True)
+    tmp.replace(path)
+
+
+def base_url(request: Request) -> str:
+    if PUBLIC_URL:
+        return PUBLIC_URL
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", request.url.netloc))
+    return f"{proto}://{host}"
+
+
+def fmt_pct(x: float, lang: str) -> str:
+    return f"{x * 100:.1f}%" if lang == "en" else f"{x * 100:.1f}".replace(".", ",") + " %"
+
+
+def html_escape(s: str) -> str:
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
 
 
 # --------------------------------------------------------------------------- #
@@ -1104,14 +1459,15 @@ class PlaybookRequest(BaseModel):
     main: list[dict]
     extra: list[dict] = Field(default_factory=list)
     ai: bool = False
+    lang: str = "de"
 
 
 @app.post("/api/playbook")
 async def api_playbook(req: PlaybookRequest) -> dict:
-    pb = build_playbook(req.archetype, req.main, req.extra)
+    pb = build_playbook(req.archetype, req.main, req.extra, req.lang)
     if req.ai:
         pb["ai"] = await ask_claude(
-            "Du bist ein Yu-Gi-Oh! Master Duel Combo-Experte. Antworte auf Deutsch.\n"
+            f"Du bist ein Yu-Gi-Oh! Master Duel Combo-Experte. Antworte auf {L(req.lang, 'Deutsch', 'Englisch')}.\n"
             f"Archetyp: {req.archetype}. Deckliste mit Kartentexten:\n{deck_prompt_block(req.main, req.extra)}\n\n"
             "Schreibe (1) eine Zug-1-Standardkombo als nummerierte Schritte ausgehend vom häufigsten "
             "1-Karten-Starter, (2) das erwartete Endboard, (3) Handtrap-Chokepoints (Ash, Imperm/Veiler, Maxx C, "
@@ -1134,28 +1490,74 @@ async def api_refresh(token: str | None = Query(None), x_refresh_token: str | No
     return JSONResponse({"ok": True, "message": "Refresh gestartet"}, status_code=202)
 
 
-_img_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
-
-
 @app.get("/img/{card_id}.jpg", include_in_schema=False)
 async def card_image(card_id: int) -> Response:
-    """Lädt jedes Kartenbild genau einmal von YGOPRODeck und liefert es danach lokal aus."""
     if card_id <= 0 or card_id > 999_999_999:
         raise HTTPException(404)
-    path = IMG_DIR / f"{card_id}.jpg"
-    headers = {"Cache-Control": "public, max-age=2592000, immutable"}
-    if path.exists():
-        return FileResponse(path, media_type="image/jpeg", headers=headers)
-    async with _img_locks[card_id]:
-        if not path.exists():
-            async with httpx.AsyncClient(timeout=30, headers={"User-Agent": USER_AGENT}) as client:
-                r = await ygo_get(client, YGO_IMG.format(id=card_id))
-            if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image"):
-                raise HTTPException(404)
-            tmp = path.with_suffix(".tmp")
-            tmp.write_bytes(r.content)
-            tmp.replace(path)
-    return FileResponse(path, media_type="image/jpeg", headers=headers)
+    path = await ensure_image(card_id)
+    if not path:
+        raise HTTPException(404)
+    return FileResponse(path, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=2592000, immutable"})
+
+
+class I18nRequest(BaseModel):
+    lang: str
+    ids: list[int] = Field(default_factory=list, max_length=200)
+
+
+@app.post("/api/i18n")
+async def api_i18n(req: I18nRequest) -> dict:
+    return {str(k): v for k, v in (await card_translations(req.ids, req.lang)).items()}
+
+
+@app.get("/api/combos")
+async def api_combos() -> dict:
+    """Aktuelle combos.json – Grundlage für den Guide-Editor (Download → GitHub hochladen)."""
+    return load_curated()
+
+
+@app.get("/api/deck/{code}")
+async def api_shared_deck(code: str, lang: str = "de", hand: int = Query(5, ge=5, le=6)) -> dict:
+    return await shared_deck(code, lang, hand)
+
+
+@app.get("/og/{code}.png", include_in_schema=False)
+async def og_image(code: str, lang: str = "de") -> Response:
+    lang = "en" if lang == "en" else "de"
+    path = OG_DIR / (hashlib.sha1(f"{code}|{lang}".encode()).hexdigest() + ".png")
+    if not path.exists():
+        deck = await shared_deck(code, lang)
+        top = sorted(deck["main"], key=lambda c: (c["role"] not in ("starter", "extender"), -c["count"]))[:7]
+        await asyncio.gather(*(ensure_image(c["id"]) for c in top if c["id"] > 0))
+        await asyncio.to_thread(render_og, deck, lang, path)
+    return FileResponse(path, media_type="image/png", headers={"Cache-Control": "public, max-age=86400"})
+
+
+@app.get("/d/{code}", include_in_schema=False)
+async def shared_page(code: str, request: Request, lang: str = "de") -> HTMLResponse:
+    """Gleiche App, aber mit Vorschau-Tags für Discord, Reddit, WhatsApp & Co."""
+    html = (BASE_DIR / "index.html").read_text(encoding="utf-8")
+    try:
+        deck = await shared_deck(code, lang)
+    except HTTPException:
+        return HTMLResponse(html)
+    a = deck["analysis"]
+    base = base_url(request)
+    title = html_escape(f"{deck['archetype']} – {fmt_pct(a['p_combo'], lang)} "
+                        f"{L(lang, 'Combo-Chance', 'combo odds')} | MD Meta Forge")
+    desc = html_escape(L(lang, f"Brick-Risiko {fmt_pct(a['tiers']['Brick'], lang)} · {a['counts']['starter']} Starter · "
+                               "Deckliste, Testhand-Zieher und Export (.ydk).",
+                         f"Brick risk {fmt_pct(a['tiers']['Brick'], lang)} · {a['counts']['starter']} starters · "
+                         "decklist, test hand and export (.ydk)."))
+    img = f"{base}/og/{code}.png?lang={lang}"
+    tags = (f'<meta property="og:type" content="website">'
+            f'<meta property="og:title" content="{title}"><meta property="og:description" content="{desc}">'
+            f'<meta property="og:image" content="{img}"><meta property="og:image:width" content="1200">'
+            f'<meta property="og:image:height" content="630"><meta property="og:url" content="{base}/d/{code}">'
+            f'<meta name="twitter:card" content="summary_large_image"><meta name="twitter:image" content="{img}">'
+            f'<meta name="description" content="{desc}">')
+    html = html.replace("<title>MD Meta Forge</title>", f"<title>{title}</title>{tags}", 1)
+    return HTMLResponse(html)
 
 
 if __name__ == "__main__":

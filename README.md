@@ -2,6 +2,12 @@
 
 Meta-Deckbau für Yu-Gi-Oh! Master Duel: Konsenslisten aus aktuellen Top-Decks, exakte Hand-Wahrscheinlichkeiten, Budget-Filter, Playbook, Deck Doctor und Export (.ydk / ydke:// / Text).
 
+## Funktionen
+- **Sprache DE/EN:** Umschalter oben rechts. Auf Deutsch kommen auch Kartennamen und -texte auf Deutsch (YGOPRODeck). Export und Kombo-Analyse laufen intern weiter mit den englischen Daten.
+- **Combo-Guide (kostenlos):** Kombo-Baum „wer holt wen?“ direkt aus den Kartentexten, Handtrap-Chokepoints, Links zur MDM-Deckseite und zu YouTube-Combo-Videos.
+- **Eigene Guides:** Im Guide auf „Guide schreiben / bearbeiten“. „Als Entwurf speichern“ gilt nur im eigenen Browser. Für alle Besucher: „combos.json herunterladen“ → Datei im GitHub-Repo ersetzen → Render baut automatisch neu.
+- **Teilen:** Link mit eingebautem Deck (funktioniert dauerhaft, keine Datenbank nötig) und automatischem Vorschaubild für Discord, Reddit, WhatsApp & Co.
+
 ## Lokal starten
 ```bash
 pip install -r requirements.txt
@@ -19,6 +25,7 @@ Beim ersten Start lädt die App die Meta-Daten automatisch (ca. 30–90 s). Dana
 | `ANTHROPIC_MODEL` | Modell für die KI-Funktionen | `claude-sonnet-5-5` |
 | `CONTACT_EMAIL` | wird im User-Agent an die Datenquellen gesendet | `unknown` |
 | `DATA_DIR` | Ort für SQLite-Cache und Kartenbilder | `./data` |
+| `PUBLIC_URL` | optional: eigene Domain für Teilen-Links, z. B. `https://meine-domain.de` | automatisch |
 
 Webhook manuell auslösen: `curl -X POST https://DEINE-APP/api/refresh -H "X-Refresh-Token: …"`
 
