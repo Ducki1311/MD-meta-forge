@@ -1,0 +1,487 @@
+<!doctype html>
+<html lang="de" class="h-full">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MD Meta Forge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+tailwind.config = { theme: { extend: {
+  fontFamily: { display: ['Orbitron', 'sans-serif'], sans: ['Inter', 'system-ui', 'sans-serif'] },
+  colors: { void: '#05070f', panel: '#0b1224', neon: '#22d3ee', gold: '#f5c542', violet: '#a855f7' }
+}}};
+</script>
+<style>
+  body { background:
+    radial-gradient(1200px 600px at 10% -10%, rgba(34,211,238,.12), transparent 60%),
+    radial-gradient(900px 500px at 110% 10%, rgba(168,85,247,.14), transparent 60%),
+    linear-gradient(180deg, #05070f, #070b18 60%, #05070f); }
+  .glass { background: rgba(13, 22, 45, .55); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+           border: 1px solid rgba(34,211,238,.18); box-shadow: 0 0 0 1px rgba(255,255,255,.02) inset, 0 10px 40px -10px rgba(0,0,0,.6); }
+  .neon-text { text-shadow: 0 0 12px rgba(34,211,238,.7); }
+  .btn { transition: all .15s ease; }
+  .btn:hover { box-shadow: 0 0 18px rgba(34,211,238,.45); transform: translateY(-1px); }
+  .card-tile { transition: transform .15s ease, box-shadow .15s ease; }
+  .card-tile:hover { transform: translateY(-4px) scale(1.04); z-index: 10; }
+  .r-UR { box-shadow: 0 0 0 2px #f5c542, 0 0 16px rgba(245,197,66,.55); }
+  .r-SR { box-shadow: 0 0 0 2px #cbd5e1, 0 0 12px rgba(203,213,225,.35); }
+  .r-R  { box-shadow: 0 0 0 2px #38bdf8; }
+  .r-N  { box-shadow: 0 0 0 1px #475569; }
+  .badge-UR { background: linear-gradient(135deg,#fde68a,#f59e0b); color:#1a1200; }
+  .badge-SR { background: linear-gradient(135deg,#f8fafc,#94a3b8); color:#0f172a; }
+  .badge-R  { background: #0ea5e9; color:#03131c; }
+  .badge-N  { background: #475569; color:#e2e8f0; }
+  .badge-\? { background: #334155; color:#cbd5e1; }
+  .pulse-dot { animation: pulse 2s infinite; }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(52,211,153,.7)} 70%{box-shadow:0 0 0 8px rgba(52,211,153,0)} 100%{box-shadow:0 0 0 0 rgba(52,211,153,0)} }
+  .draw-in { animation: drawIn .35s ease both; }
+  @keyframes drawIn { from { opacity:0; transform: translateY(-20px) rotate(-4deg);} to {opacity:1; transform:none;} }
+  ::-webkit-scrollbar { width: 8px; height: 8px } ::-webkit-scrollbar-thumb { background:#1e293b; border-radius: 8px }
+  .prose-ai p { margin: .4rem 0 } .prose-ai li { margin-left: 1.2rem; list-style: disc }
+</style>
+</head>
+<body class="h-full text-slate-200 font-sans antialiased">
+
+<!-- ============ HEADER ============ -->
+<header class="sticky top-0 z-30 glass border-x-0 border-t-0">
+  <div class="max-w-[1500px] mx-auto px-4 py-3 flex flex-wrap items-center gap-3">
+    <div class="flex items-center gap-2">
+      <div class="w-9 h-9 rounded-lg bg-gradient-to-br from-neon to-violet grid place-items-center font-display font-extrabold text-void">M</div>
+      <h1 class="font-display text-lg sm:text-xl tracking-widest neon-text">MD&nbsp;META&nbsp;FORGE</h1>
+    </div>
+    <div id="statusBadge" class="flex items-center gap-2 text-xs px-3 py-1.5 rounded-full bg-slate-900/70 border border-slate-700">
+      <span class="w-2 h-2 rounded-full bg-slate-500" id="statusDot"></span>
+      <span id="statusText">Meta-Status wird geladen…</span>
+    </div>
+    <div class="ml-auto flex gap-2">
+      <button onclick="openDoctor()" class="btn px-3 py-2 rounded-lg bg-violet/20 border border-violet/50 text-sm font-semibold">🩺 Deck Doctor</button>
+      <button onclick="openModal('helpModal')" class="btn px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-sm">?</button>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-[1500px] mx-auto px-4 py-5 grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-5">
+
+  <!-- ============ TIER LIST ============ -->
+  <aside class="glass rounded-2xl p-4 h-fit lg:sticky lg:top-20">
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-display text-sm tracking-widest text-neon">TIER-LISTE</h2>
+      <span id="sampleInfo" class="text-[11px] text-slate-400"></span>
+    </div>
+    <input id="tierSearch" oninput="renderTierlist()" placeholder="Archetyp suchen…" class="w-full mb-3 px-3 py-2 rounded-lg bg-slate-900/80 border border-slate-700 text-sm focus:outline-none focus:border-neon">
+    <ul id="tierlist" class="space-y-1.5 max-h-[65vh] overflow-y-auto pr-1"></ul>
+    <p class="text-[11px] text-slate-500 mt-3">Meta-Anteil = Anteil an Top-/Turnier-Decks im Zeitfenster. Tier-Badge nur, wenn MDM es liefert.</p>
+  </aside>
+
+  <section class="space-y-5 min-w-0">
+    <!-- ============ CONTROLS ============ -->
+    <div class="glass rounded-2xl p-4">
+      <div class="grid grid-cols-2 md:grid-cols-5 gap-3 items-end">
+        <label class="col-span-2 md:col-span-1 text-xs text-slate-400">Archetyp
+          <select id="archSelect" class="mt-1 w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm text-slate-100"></select>
+        </label>
+        <label class="text-xs text-slate-400">Max. UR-CP (leer = ∞)
+          <input id="maxUR" type="number" min="0" step="30" placeholder="z. B. 300" class="mt-1 w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm">
+        </label>
+        <label class="text-xs text-slate-400">Max. SR-CP (leer = ∞)
+          <input id="maxSR" type="number" min="0" step="30" placeholder="z. B. 450" class="mt-1 w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm">
+        </label>
+        <label class="text-xs text-slate-400">Konsistenz-Ziel: <b id="targetVal" class="text-neon">85%</b>
+          <input id="target" type="range" min="70" max="95" value="85" oninput="targetVal.textContent=this.value+'%'" class="mt-3 w-full accent-cyan-400">
+        </label>
+        <div class="flex gap-2">
+          <select id="handSize" class="px-2 py-2 rounded-lg bg-slate-900 border border-slate-700 text-sm" title="5 = du beginnst, 6 = du ziehst als Zweiter">
+            <option value="5">5 Karten (1st)</option><option value="6">6 Karten (2nd)</option>
+          </select>
+          <button onclick="buildDeck()" class="btn flex-1 px-4 py-2 rounded-lg bg-gradient-to-r from-cyan-500 to-violet font-bold text-void">⚡ Bauen</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="emptyState" class="glass rounded-2xl p-10 text-center text-slate-400">
+      <div class="font-display text-neon text-lg mb-2">Wähle einen Archetyp</div>
+      Das Deck wird als Konsens aller aktuellen Top-Listen berechnet und auf dein Konsistenz-Ziel optimiert.
+    </div>
+
+    <div id="deckArea" class="hidden space-y-5">
+      <!-- ============ STATS ============ -->
+      <div class="grid grid-cols-2 xl:grid-cols-4 gap-3">
+        <div class="glass rounded-2xl p-4"><div class="text-xs text-slate-400">Combo-Chance</div><div id="pCombo" class="font-display text-3xl mt-1"></div><div class="text-[11px] text-slate-500">1-Karten-Starter oder 2 Extender</div></div>
+        <div class="glass rounded-2xl p-4"><div class="text-xs text-slate-400">1-Karten-Starter</div><div id="pOne" class="font-display text-3xl mt-1 text-neon"></div><div id="minStart" class="text-[11px] text-slate-500"></div></div>
+        <div class="glass rounded-2xl p-4"><div class="text-xs text-slate-400">≥ 1 Interaktion</div><div id="pInter" class="font-display text-3xl mt-1 text-violet"></div><div id="htInfo" class="text-[11px] text-slate-500"></div></div>
+        <div class="glass rounded-2xl p-4"><div class="text-xs text-slate-400">Craft-Kosten</div><div id="cpInfo" class="text-sm mt-2 space-y-0.5"></div></div>
+      </div>
+
+      <div class="grid grid-cols-1 xl:grid-cols-2 gap-5">
+        <div class="glass rounded-2xl p-4">
+          <h3 class="font-display text-xs tracking-widest text-neon mb-2">HAND-QUALITÄT (EXAKT, HYPERGEOMETRISCH)</h3>
+          <div class="h-56"><canvas id="tierChart"></canvas></div>
+        </div>
+        <div class="glass rounded-2xl p-4">
+          <h3 class="font-display text-xs tracking-widest text-neon mb-2">STARTER-ANZAHL → TREFFERCHANCE</h3>
+          <div class="h-56"><canvas id="ratioChart"></canvas></div>
+        </div>
+      </div>
+
+      <!-- ============ TEST HAND ============ -->
+      <div class="glass rounded-2xl p-4">
+        <div class="flex flex-wrap items-center gap-3 mb-3">
+          <h3 class="font-display text-xs tracking-widest text-neon">LIVE TEST-HAND</h3>
+          <button onclick="drawHand()" class="btn px-4 py-2 rounded-lg bg-cyan-500/20 border border-neon text-sm font-semibold">🎴 <span id="drawLabel">5 Karten ziehen</span></button>
+          <span id="handTier" class="text-sm"></span>
+          <span id="drawStats" class="ml-auto text-xs text-slate-400"></span>
+        </div>
+        <div id="hand" class="flex gap-3 overflow-x-auto pb-1 min-h-[10px]"></div>
+      </div>
+
+      <!-- ============ DECK ============ -->
+      <div class="glass rounded-2xl p-4">
+        <div class="flex flex-wrap items-center gap-2 mb-3">
+          <h3 class="font-display text-xs tracking-widest text-neon">MAIN DECK <span id="mainCount" class="text-slate-400"></span></h3>
+          <div id="roleCounts" class="flex flex-wrap gap-1.5 text-[11px]"></div>
+          <div class="ml-auto flex flex-wrap gap-2">
+            <button onclick="openPlaybook()" class="btn px-3 py-1.5 rounded-lg bg-violet/20 border border-violet/50 text-xs font-semibold">📖 Playbook</button>
+            <button onclick="exportYdk()" class="btn px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-xs">⬇ .ydk</button>
+            <button onclick="copyYdke()" class="btn px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-xs">ydke://</button>
+            <button onclick="copyText()" class="btn px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-600 text-xs">Text-Liste</button>
+          </div>
+        </div>
+        <p class="text-[11px] text-slate-500 mb-3">Tipp: Klick auf eine Karte ändert ihre Rolle – die Wahrscheinlichkeiten werden sofort neu berechnet.</p>
+        <div id="mainDeck" class="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2"></div>
+        <h3 class="font-display text-xs tracking-widest text-neon mt-5 mb-3">EXTRA DECK <span id="extraCount" class="text-slate-400"></span></h3>
+        <div id="extraDeck" class="grid grid-cols-5 sm:grid-cols-8 md:grid-cols-10 gap-2"></div>
+      </div>
+
+      <div class="glass rounded-2xl p-4">
+        <h3 class="font-display text-xs tracking-widest text-neon mb-2">OPTIMIERER-PROTOKOLL</h3>
+        <ul id="changes" class="text-sm space-y-1"></ul>
+        <div id="sources" class="text-[11px] text-slate-500 mt-3"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="max-w-[1500px] mx-auto px-4 pb-8 text-[11px] text-slate-500">
+  Daten: masterduelmeta.com (Top-Decks) & YGOPRODeck API (Kartentexte, Bilder lokal gecacht). Inoffizielles Fan-Tool, nicht mit Konami verbunden.
+</footer>
+
+<!-- ============ TOOLTIP ============ -->
+<div id="tooltip" class="hidden fixed z-50 max-w-sm glass rounded-xl p-3 text-xs pointer-events-none"></div>
+
+<!-- ============ ROLE MENU ============ -->
+<div id="roleMenu" class="hidden fixed z-50 glass rounded-xl p-2 text-sm"></div>
+
+<!-- ============ MODALS ============ -->
+<div id="playbookModal" class="hidden fixed inset-0 z-40 bg-black/70 p-4 overflow-y-auto" onclick="if(event.target===this)closeModal('playbookModal')">
+  <div class="glass rounded-2xl max-w-3xl mx-auto mt-10 p-5">
+    <div class="flex items-center mb-3"><h2 class="font-display tracking-widest text-neon">PLAYBOOK</h2>
+      <button onclick="closeModal('playbookModal')" class="ml-auto text-slate-400 hover:text-white text-xl">✕</button></div>
+    <div id="playbookBody" class="space-y-4 text-sm"></div>
+  </div>
+</div>
+
+<div id="doctorModal" class="hidden fixed inset-0 z-40 bg-black/70 p-4 overflow-y-auto" onclick="if(event.target===this)closeModal('doctorModal')">
+  <div class="glass rounded-2xl max-w-4xl mx-auto mt-10 p-5">
+    <div class="flex items-center mb-3"><h2 class="font-display tracking-widest text-violet">DECK DOCTOR</h2>
+      <button onclick="closeModal('doctorModal')" class="ml-auto text-slate-400 hover:text-white text-xl">✕</button></div>
+    <p class="text-xs text-slate-400 mb-2">Füge eine .ydk-Datei (Inhalt) oder eine Liste ein, z. B. <code>3 Ash Blossom &amp; Joyous Spring</code>. Abschnitte „Extra“/„Side“ werden erkannt.</p>
+    <textarea id="doctorText" rows="10" class="w-full p-3 rounded-lg bg-slate-950 border border-slate-700 font-mono text-xs focus:outline-none focus:border-violet" placeholder="#main&#10;14558127&#10;…"></textarea>
+    <div class="flex flex-wrap items-center gap-3 mt-3">
+      <input type="file" accept=".ydk,.txt" onchange="loadYdkFile(this)" class="text-xs text-slate-400">
+      <label class="text-xs flex items-center gap-2"><input id="doctorAi" type="checkbox" class="accent-violet-500"> KI-Analyse (Claude)</label>
+      <button onclick="runDoctor()" class="btn ml-auto px-4 py-2 rounded-lg bg-violet/30 border border-violet font-semibold text-sm">Analysieren</button>
+    </div>
+    <div id="doctorResult" class="mt-4 space-y-3 text-sm"></div>
+  </div>
+</div>
+
+<div id="helpModal" class="hidden fixed inset-0 z-40 bg-black/70 p-4" onclick="if(event.target===this)closeModal('helpModal')">
+  <div class="glass rounded-2xl max-w-2xl mx-auto mt-16 p-5 text-sm space-y-2">
+    <div class="flex"><h2 class="font-display tracking-widest text-neon">SO RECHNET DAS TOOL</h2><button onclick="closeModal('helpModal')" class="ml-auto text-xl text-slate-400">✕</button></div>
+    <p><b>Deckbau:</b> Für jede Karte wird die durchschnittliche Kopienzahl über alle aktuellen Listen des Archetyps berechnet und per Largest-Remainder auf 40 Plätze verteilt (Banliste beachtet).</p>
+    <p><b>Konsistenz:</b> Exakte multivariate hypergeometrische Verteilung über Starter, Extender, Handtraps, Breaker und Rest. Liegt die Combo-Chance unter dem Ziel, tauscht der Optimierer schwache Karten gegen Starter, die der Archetyp tatsächlich spielt.</p>
+    <p><b>Hand-Tiers:</b> <span class="text-amber-300">S</span> = Combo + Folgekarte + Interaktion · <span class="text-cyan-300">A</span> = spielbare Combo · <span class="text-violet-300">B</span> = keine Combo, aber ≥ 2 Interaktionen · <span class="text-rose-400">Brick</span> = nichts davon.</p>
+    <p><b>Rollen</b> werden aus Kartentexten erkannt (Heuristik). Klicke Karten an, um falsche Rollen zu korrigieren.</p>
+    <p><b>Budget:</b> Jede Karte kostet 30 CP ihrer Seltenheit. Teure Karten mit dem geringsten Beitrag werden zuerst durch günstigere Karten derselben Rolle ersetzt.</p>
+  </div>
+</div>
+
+<div id="toast" class="hidden fixed bottom-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg bg-slate-900 border border-neon text-sm"></div>
+
+<script>
+// ===================================================================
+// State & Helpers
+// ===================================================================
+const ROLES = { starter:['Starter','#22d3ee'], extender:['Extender','#34d399'], handtrap:['Handtrap','#a855f7'],
+  breaker:['Board Breaker','#f43f5e'], engine:['Engine/Brick','#94a3b8'], draw:['Draw','#f5c542'], tech:['Tech','#fb923c'], extra:['Extra','#64748b'] };
+const S = { status:null, tiers:[], deck:null, overrides:{}, charts:{}, draws:{S:0,A:0,B:0,Brick:0} };
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pct = x => (x*100).toFixed(1).replace('.', ',') + ' %';
+
+async function api(path, opts={}) {
+  const r = await fetch(path, { headers:{'Content-Type':'application/json'}, ...opts });
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m } catch {} ; throw new Error(typeof m === 'string' ? m : JSON.stringify(m)); }
+  return r.json();
+}
+function toast(msg, ms=2600) { const t=$('toast'); t.textContent=msg; t.classList.remove('hidden'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.add('hidden'), ms); }
+function openModal(id){ $(id).classList.remove('hidden') } function closeModal(id){ $(id).classList.add('hidden') }
+document.addEventListener('keydown', e => { if (e.key==='Escape') ['playbookModal','doctorModal','helpModal'].forEach(closeModal) });
+
+// ===================================================================
+// Status-Badge & Tier-Liste
+// ===================================================================
+async function loadStatus() {
+  try {
+    S.status = await api('/api/status');
+    const st = S.status, dot = $('statusDot'), txt = $('statusText');
+    if (st.refreshing) { dot.className='w-2 h-2 rounded-full bg-amber-400 pulse-dot'; txt.textContent='Meta-Status: Aktualisiere…'; }
+    else if (st.ok && st.last_update) {
+      const t = new Date(st.last_update).toLocaleTimeString('de-DE',{hour:'2-digit',minute:'2-digit'});
+      const d = new Date(st.last_update).toLocaleDateString('de-DE');
+      dot.className='w-2 h-2 rounded-full bg-emerald-400 pulse-dot';
+      txt.innerHTML = `Meta-Status: <b class="text-emerald-300">Live aktualisiert</b> (Stand: ${t})`;
+      $('statusBadge').title = `${d} · ${st.decks} Decks · ${st.archetypes} Archetypen · nächstes Update: ${st.next_run ? new Date(st.next_run).toLocaleString('de-DE') : '–'}`;
+      $('sampleInfo').textContent = `${st.decks} Decks · ${st.window_days} Tage`;
+    } else { dot.className='w-2 h-2 rounded-full bg-rose-500'; txt.textContent='Meta-Status: keine Daten (Refresh fehlgeschlagen)';
+      $('statusBadge').title = (st.errors||[]).join('\n'); }
+    $('doctorAi').disabled = !st.ai_enabled; $('doctorAi').parentElement.title = st.ai_enabled ? '' : 'ANTHROPIC_API_KEY nicht gesetzt';
+  } catch(e) { $('statusText').textContent = 'Backend nicht erreichbar'; }
+}
+
+async function loadTierlist() {
+  S.tiers = await api('/api/tierlist').catch(() => []);
+  const sel = $('archSelect'), cur = sel.value;
+  sel.innerHTML = S.tiers.map(t => `<option>${esc(t.archetype)}</option>`).join('');
+  if (cur) sel.value = cur;
+  renderTierlist();
+}
+function renderTierlist() {
+  const q = $('tierSearch').value.toLowerCase(), max = Math.max(...S.tiers.map(t=>t.share), .01);
+  $('tierlist').innerHTML = S.tiers.filter(t => t.archetype.toLowerCase().includes(q)).map(t => `
+    <li><button onclick="pickArch(this.dataset.a)" data-a="${esc(t.archetype)}" class="w-full text-left px-3 py-2 rounded-lg hover:bg-cyan-500/10 border border-transparent hover:border-neon/40 transition">
+      <div class="flex items-center gap-2 text-sm">
+        ${t.tier!=null ? `<span class="text-[10px] font-bold px-1.5 py-0.5 rounded ${t.tier==1?'bg-amber-400 text-black':t.tier==2?'bg-slate-300 text-black':'bg-slate-700'}">T${esc(t.tier)}</span>` : ''}
+        <span class="truncate">${esc(t.archetype)}</span><span class="ml-auto text-xs text-slate-400">${pct(t.share)}</span></div>
+      <div class="mt-1 h-1 rounded bg-slate-800"><div class="h-1 rounded bg-gradient-to-r from-cyan-400 to-violet" style="width:${t.share/max*100}%"></div></div>
+    </button></li>`).join('') || '<li class="text-xs text-slate-500">Noch keine Daten – das erste Update läuft beim Start automatisch.</li>';
+}
+function pickArch(a) { $('archSelect').value = a; S.overrides = {}; buildDeck(); }
+
+// ===================================================================
+// Deck bauen & rendern
+// ===================================================================
+async function buildDeck() {
+  const arch = $('archSelect').value; if (!arch) return toast('Kein Archetyp verfügbar');
+  const body = { archetype: arch, target: +$('target').value/100, hand_size: +$('handSize').value, overrides: S.overrides,
+    max_ur_cp: $('maxUR').value === '' ? null : +$('maxUR').value, max_sr_cp: $('maxSR').value === '' ? null : +$('maxSR').value };
+  try { toast('Berechne Deck…', 1200); S.deck = await api('/api/build', { method:'POST', body: JSON.stringify(body) }); }
+  catch(e) { return toast('Fehler: ' + e.message, 5000); }
+  S.draws = {S:0,A:0,B:0,Brick:0}; $('hand').innerHTML=''; $('handTier').textContent=''; $('drawStats').textContent='';
+  $('emptyState').classList.add('hidden'); $('deckArea').classList.remove('hidden');
+  renderDeck(); renderAnalysis(S.deck.analysis); renderChanges();
+}
+
+function cardTile(c, opts={}) {
+  const img = c.id ? `<img loading="lazy" src="/img/${c.id}.jpg" alt="${esc(c.name)}" class="w-full aspect-[59/86] object-cover rounded-md">`
+                   : `<div class="w-full aspect-[59/86] rounded-md bg-slate-800 grid place-items-center p-1 text-[9px] text-center">${esc(c.name)}</div>`;
+  const role = ROLES[c.role] || ROLES.tech;
+  return `<div class="card-tile relative rounded-md r-${esc(c.rarity)} ${opts.anim?'draw-in':''} cursor-pointer" ${opts.style||''}
+      data-name="${esc(c.name)}" onmouseenter="showTip(event,this)" onmousemove="moveTip(event)" onmouseleave="hideTip()" ${opts.click?`onclick="roleMenu(event,this.dataset.name)"`:''}>
+    ${img}
+    ${c.count>1 && !opts.hideCount ? `<span class="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-void border border-neon text-[11px] font-bold grid place-items-center">${c.count}</span>`:''}
+    <span class="absolute top-1 left-1 text-[9px] font-extrabold px-1 rounded badge-${esc(c.rarity)}">${esc(c.rarity)}</span>
+    <span class="absolute bottom-0 inset-x-0 text-[9px] text-center font-semibold rounded-b-md py-0.5" style="background:${role[1]}cc;color:#030712">${role[0]}</span>
+  </div>`;
+}
+function findCard(name) { return [...S.deck.main, ...S.deck.extra].find(c => c.name === name); }
+
+function renderDeck() {
+  const d = S.deck;
+  $('mainDeck').innerHTML = d.main.map(c => cardTile(c, {click:true})).join('');
+  $('extraDeck').innerHTML = d.extra.map(c => cardTile(c)).join('') || '<span class="text-xs text-slate-500">Kein Extra Deck in den Listen.</span>';
+  const mc = d.main.reduce((a,c)=>a+c.count,0), ec = d.extra.reduce((a,c)=>a+c.count,0);
+  $('mainCount').textContent = `(${mc})`; $('extraCount').textContent = `(${ec})`;
+  const rc = {}; d.main.forEach(c => rc[c.role] = (rc[c.role]||0) + c.count);
+  $('roleCounts').innerHTML = Object.entries(rc).map(([r,n]) => `<span class="px-2 py-0.5 rounded-full border" style="border-color:${ROLES[r][1]};color:${ROLES[r][1]}">${ROLES[r][0]} ${n}</span>`).join('');
+  const cp = d.cp; $('cpInfo').innerHTML = ['UR','SR','R','N'].map(r => `<div class="flex justify-between"><span class="px-1.5 rounded text-[10px] font-bold badge-${r}">${r}</span><span>${cp[r]} CP</span></div>`).join('');
+  $('drawLabel').textContent = `${$('handSize').value} Karten ziehen`;
+}
+
+function renderAnalysis(a) {
+  const d = S.deck, target = d.target;
+  $('pCombo').textContent = pct(a.p_combo);
+  $('pCombo').className = 'font-display text-3xl mt-1 ' + (a.p_combo >= target ? 'text-emerald-300' : 'text-rose-400');
+  $('pOne').textContent = pct(a.p_one_card_starter);
+  $('minStart').textContent = `${a.counts.starter} Starter · Ziel ${Math.round(target*100)} % braucht ≥ ${d.min_starters_one_card}`;
+  $('pInter').textContent = pct(a.p_interaction);
+  $('htInfo').textContent = `${a.counts.handtrap} Handtraps (Meta-Ø ${d.meta_avg_handtraps}) · ${a.counts.breaker} Breaker`;
+
+  const ctx = $('tierChart'), labels = ['S (Full Combo)','A (Combo)','B (Interaktion)','Brick'], vals = ['S','A','B','Brick'].map(k => +(a.tiers[k]*100).toFixed(2));
+  S.charts.tier?.destroy();
+  S.charts.tier = new Chart(ctx, { type:'bar', data:{ labels, datasets:[{ data: vals, backgroundColor:['#f5c542','#22d3ee','#a855f7','#f43f5e'], borderRadius:6 }]},
+    options:{ maintainAspectRatio:false, plugins:{legend:{display:false}, tooltip:{callbacks:{label:c=>c.parsed.y.toFixed(1)+' %'}}},
+      scales:{ y:{ ticks:{color:'#94a3b8', callback:v=>v+' %'}, grid:{color:'#1e293b'} }, x:{ ticks:{color:'#cbd5e1'}, grid:{display:false} } } } });
+  renderRatioChart(a);
+}
+
+async function renderRatioChart(a) {
+  const rows = await api('/api/ratio-table?deck=40');
+  const key = a.hand_size === 6 ? 'p6' : 'p5';
+  S.charts.ratio?.destroy();
+  S.charts.ratio = new Chart($('ratioChart'), { type:'line',
+    data:{ labels: rows.map(r=>r.starters), datasets:[
+      { label:`P(≥1 Starter, ${a.hand_size} Karten)`, data: rows.map(r=>+(r[key]*100).toFixed(2)), borderColor:'#22d3ee', backgroundColor:'rgba(34,211,238,.15)', fill:true, tension:.3,
+        pointRadius: rows.map(r => r.starters===a.counts.starter ? 7 : 0), pointBackgroundColor:'#f5c542' },
+      { label:'Ziel', data: rows.map(()=>S.deck.target*100), borderColor:'#f43f5e', borderDash:[6,4], pointRadius:0 } ]},
+    options:{ maintainAspectRatio:false, plugins:{ legend:{labels:{color:'#cbd5e1'}} },
+      scales:{ y:{min:0,max:100, ticks:{color:'#94a3b8', callback:v=>v+' %'}, grid:{color:'#1e293b'}}, x:{ title:{display:true,text:'Anzahl Starter im 40er-Deck',color:'#94a3b8'}, ticks:{color:'#94a3b8'}, grid:{display:false}} } } });
+}
+
+function renderChanges() {
+  const ch = S.deck.changes;
+  $('changes').innerHTML = ch.length ? ch.map(c => `<li><span class="text-[10px] px-1.5 py-0.5 rounded ${c.reason==='Konsistenz'?'bg-cyan-500/20 text-cyan-300':'bg-amber-500/20 text-amber-300'}">${esc(c.reason)}</span>
+     ${c.out ? `<span class="text-rose-300">− ${esc(c.out)}</span>` : ''} ${c.in ? `→ <span class="text-emerald-300">+ ${esc(c.in)}</span>`:'<span class="text-slate-500">(ohne Ersatz)</span>'} <span class="text-slate-500 text-xs">${c.part==='extra'?'Extra':''}</span></li>`).join('')
+    : '<li class="text-slate-400">Keine Änderungen nötig – die Konsensliste erfüllt Budget und Konsistenz-Ziel.</li>';
+  if (S.deck.missing_slots) $('changes').insertAdjacentHTML('beforeend', `<li class="text-rose-300 mt-2">⚠ Mit diesem Budget fehlen ${S.deck.missing_slots} Karten bis 40 – Budget erhöhen oder eigene günstige Karten ergänzen.</li>`);
+  if (!S.deck.target_reached) $('changes').insertAdjacentHTML('beforeend', `<li class="text-rose-300 mt-2">⚠ Ziel nicht erreicht: Der Archetyp spielt nicht genug zusätzliche Starter (im Rahmen des Budgets). Ehrliches Ergebnis statt Kartenfüller.</li>`);
+  $('sources').innerHTML = `Basis: ${S.deck.sample_size} Listen. ` + S.deck.sources.slice(0,6).map(s => s.url ? `<a class="underline hover:text-neon" target="_blank" rel="noopener" href="https://www.masterduelmeta.com${s.url.startsWith('/')?esc(s.url):'/'+esc(s.url)}">${esc(s.event||'Deck')} ${esc(s.created)}</a>` : `${esc(s.event||'Deck')} ${esc(s.created)}`).join(' · ');
+}
+
+// ===================================================================
+// Rollen-Overrides
+// ===================================================================
+function roleMenu(ev, name) {
+  ev.stopPropagation(); const m = $('roleMenu');
+  m.innerHTML = `<div class="text-[11px] text-slate-400 px-2 pb-1 max-w-[220px] truncate">${esc(name)}</div>` +
+    Object.entries(ROLES).filter(([k])=>k!=='extra').map(([k,[l,c]]) => `<button class="block w-full text-left px-2 py-1 rounded hover:bg-slate-700" style="color:${c}" onclick="setRole('${k}')">${l}</button>`).join('');
+  m.dataset.name = name; m.style.left = Math.min(ev.clientX, innerWidth-200)+'px'; m.style.top = Math.min(ev.clientY, innerHeight-280)+'px'; m.classList.remove('hidden');
+}
+document.addEventListener('click', () => $('roleMenu').classList.add('hidden'));
+async function setRole(role) {
+  const name = $('roleMenu').dataset.name; S.overrides[name] = role; findCard(name).role = role;
+  const counts = {starter:0,extender:0,handtrap:0,breaker:0,other:0};
+  S.deck.main.forEach(c => { const k = ['starter','extender','handtrap','breaker'].includes(c.role) ? c.role : 'other'; counts[k]+=c.count; });
+  const a = await api('/api/analyze', { method:'POST', body: JSON.stringify({ counts, hand_size: +$('handSize').value }) });
+  S.deck.analysis = a; renderDeck(); renderAnalysis(a); toast(`${name} → ${ROLES[role][0]} (Bauen = neu optimieren)`);
+}
+
+// ===================================================================
+// Tooltip
+// ===================================================================
+function showTip(ev, el) {
+  const c = findCard(el.dataset.name) || (S.doctorDeck && [...S.doctorDeck.main, ...S.doctorDeck.extra].find(x=>x.name===el.dataset.name)); if (!c) return;
+  $('tooltip').innerHTML = `<div class="flex items-center gap-2 mb-1"><b class="text-sm text-white">${esc(c.name)}</b><span class="ml-auto text-[10px] px-1.5 rounded font-bold badge-${esc(c.rarity)}">${esc(c.rarity)}</span></div>
+    <div class="text-[10px] text-slate-400 mb-1">${esc(c.type)} · ${ROLES[c.role]?.[0]||''}${c.inclusion!=null?` · in ${Math.round(c.inclusion*100)} % der Listen`:''}${c.ban!=null?` · <span class="text-rose-400">Limit ${c.ban}</span>`:''}</div>
+    <div class="text-slate-200 whitespace-pre-line leading-snug">${esc(c.desc || 'Kein Kartentext im Cache.')}</div>`;
+  $('tooltip').classList.remove('hidden'); moveTip(ev);
+}
+function moveTip(ev) { const t=$('tooltip'), w=t.offsetWidth, h=t.offsetHeight;
+  t.style.left = (ev.clientX + 18 + w > innerWidth ? ev.clientX - w - 12 : ev.clientX + 18) + 'px';
+  t.style.top = Math.max(8, Math.min(ev.clientY + 12, innerHeight - h - 8)) + 'px'; }
+function hideTip(){ $('tooltip').classList.add('hidden') }
+
+// ===================================================================
+// Live Test-Hand
+// ===================================================================
+function evaluateHand(cards) {
+  const n = r => cards.filter(c => c.role === r).length, s=n('starter'), e=n('extender'), h=n('handtrap'), b=n('breaker');
+  const combo = s >= 1 || e >= 2;
+  if (combo && s+e >= 2 && h+b >= 1) return ['S', 'S Tier – Full Combo mit Folgekarte und Interaktion', 'text-amber-300'];
+  if (combo) return ['A', s ? 'A Tier – Starter vorhanden, Combo spielbar' : 'A Tier – 2-Karten-Combo aus Extendern', 'text-cyan-300'];
+  if (h+b >= 2) return ['B', 'B Tier – keine Combo, aber genug Interaktion', 'text-violet-300'];
+  return ['Brick', 'Brick – weder Combo noch ausreichende Interaktion', 'text-rose-400'];
+}
+function drawHand() {
+  const pool = S.deck.main.flatMap(c => Array(c.count).fill(c));
+  for (let i = pool.length - 1; i > 0; i--) { const j = crypto.getRandomValues(new Uint32Array(1))[0] % (i+1); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+  const hand = pool.slice(0, +$('handSize').value);
+  $('hand').innerHTML = hand.map((c,i) => `<div class="w-24 shrink-0">${cardTile(c,{anim:true, hideCount:true, style:`style="animation-delay:${i*70}ms"`})}</div>`).join('');
+  const [tier, label, cls] = evaluateHand(hand); S.draws[tier]++;
+  $('handTier').innerHTML = `<b class="${cls}">${label}</b>`;
+  const tot = Object.values(S.draws).reduce((a,b)=>a+b,0);
+  $('drawStats').textContent = `Deine ${tot} Züge: ` + ['S','A','B','Brick'].map(k=>`${k} ${Math.round(S.draws[k]/tot*100)} %`).join(' · ') + ` | erwartet Brick ${pct(S.deck.analysis.tiers.Brick)}`;
+}
+
+// ===================================================================
+// Export
+// ===================================================================
+function idsOf(list) { return list.flatMap(c => Array(c.count).fill(c.id)).filter(Boolean); }
+function exportYdk() {
+  const d = S.deck, missing = [...d.main, ...d.extra].filter(c => !c.id).map(c => c.name);
+  const txt = ['#created by MD Meta Forge', '#main', ...idsOf(d.main), '#extra', ...idsOf(d.extra), '!side', ''].join('\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([txt], {type:'text/plain'}));
+  a.download = `${d.archetype.replace(/[^\w-]+/g,'_')}.ydk`; a.click(); URL.revokeObjectURL(a.href);
+  toast(missing.length ? `.ydk exportiert – ohne ID: ${missing.join(', ')}` : '.ydk exportiert', missing.length ? 6000 : 2600);
+}
+function b64ids(ids) { const buf = new Uint8Array(ids.length*4), dv = new DataView(buf.buffer); ids.forEach((id,i)=>dv.setUint32(i*4, id, true));
+  let s=''; buf.forEach(b => s += String.fromCharCode(b)); return btoa(s); }
+async function copyYdke() { const d=S.deck; await navigator.clipboard.writeText(`ydke://${b64ids(idsOf(d.main))}!${b64ids(idsOf(d.extra))}!!`); toast('ydke:// in die Zwischenablage kopiert'); }
+async function copyText() { const d=S.deck, f = l => l.map(c => `${c.count} ${c.name}`).join('\n');
+  await navigator.clipboard.writeText(`Main Deck\n${f(d.main)}\n\nExtra Deck\n${f(d.extra)}\n`); toast('Text-Liste kopiert'); }
+
+// ===================================================================
+// Playbook
+// ===================================================================
+async function openPlaybook(ai=false) {
+  openModal('playbookModal'); $('playbookBody').innerHTML = `<div class="text-slate-400">${ai?'KI schreibt die Kombo… (kann ~30 s dauern)':'Erzeuge Playbook…'}</div>`;
+  let pb; try { pb = await api('/api/playbook', { method:'POST', body: JSON.stringify({ archetype:S.deck.archetype, main:S.deck.main, extra:S.deck.extra, ai }) }); }
+  catch(e) { $('playbookBody').innerHTML = `<div class="text-rose-400">${esc(e.message)}</div>`; return; }
+  const yes = '<span class="text-rose-400 font-bold">ja</span>', no = '<span class="text-slate-500">nein</span>';
+  $('playbookBody').innerHTML = `
+    <div class="text-[11px] text-slate-400">Quelle: ${esc(pb.source)}</div>
+    <section><h3 class="font-display text-xs tracking-widest text-neon mb-2">ZUG 1 – STANDARD-KOMBO</h3>
+      <ol class="space-y-2">${pb.turn1.map((s,i)=>`<li class="flex gap-3"><span class="shrink-0 w-6 h-6 rounded-full bg-cyan-500/20 border border-neon grid place-items-center text-xs font-bold">${i+1}</span><span>${esc(s.text)}</span></li>`).join('')}</ol></section>
+    <section><h3 class="font-display text-xs tracking-widest text-violet mb-2">HANDTRAP-GUIDANCE (CHOKEPOINTS)</h3>
+      <div class="overflow-x-auto"><table class="w-full text-xs"><thead class="text-slate-400"><tr><th class="text-left py-1">Karte</th><th>Ash</th><th>Imperm/Veiler</th><th class="text-left">Hinweis</th></tr></thead>
+      <tbody>${pb.chokepoints.map(c=>`<tr class="border-t border-slate-800"><td class="py-1.5 pr-2 font-semibold">${esc(c.card||'Kuratiert')}</td><td class="text-center">${c.ash==null?'–':c.ash?yes:no}</td><td class="text-center">${c.imperm==null?'–':c.imperm?yes:no}</td><td class="text-slate-300">${esc(c.tip)}</td></tr>`).join('')}</tbody></table></div>
+      <p class="mt-2 text-xs">🛡 Schutzkarten im Deck: ${pb.protection_in_deck.length ? pb.protection_in_deck.map(esc).join(', ') : '<span class="text-rose-300">keine – erwäge Called by the Grave / Crossout Designator</span>'}</p>
+      <p class="mt-1 text-xs text-slate-300">${esc(pb.maxx_c.text)}</p>
+      ${pb.notes ? `<p class="mt-2 text-xs text-slate-300">${esc(pb.notes)}</p>`:''}</section>
+    ${pb.ai ? `<section><h3 class="font-display text-xs tracking-widest text-amber-300 mb-2">KI-KOMBO-GUIDE (vor Turnier-Einsatz prüfen)</h3><div class="prose-ai text-slate-200 whitespace-pre-line">${esc(pb.ai)}</div></section>` : ''}
+    ${!ai && S.status?.ai_enabled ? `<button onclick="openPlaybook(true)" class="btn px-4 py-2 rounded-lg bg-amber-400/20 border border-amber-400 text-sm font-semibold">✨ Detaillierte KI-Kombo erzeugen</button>` : ''}
+    ${!S.status?.ai_enabled ? `<p class="text-[11px] text-slate-500">Für ausformulierte Kombos: ANTHROPIC_API_KEY setzen oder eigene Kombos in combos.json hinterlegen.</p>`:''}`;
+}
+
+// ===================================================================
+// Deck Doctor
+// ===================================================================
+function openDoctor(){ openModal('doctorModal'); }
+function loadYdkFile(inp) { const f = inp.files[0]; if (!f) return; f.text().then(t => $('doctorText').value = t); }
+async function runDoctor() {
+  const text = $('doctorText').value.trim(); if (!text) return toast('Bitte zuerst eine Deckliste einfügen');
+  $('doctorResult').innerHTML = `<div class="text-slate-400">Analysiere${$('doctorAi').checked?' (inkl. KI, ~30 s)':''}…</div>`;
+  let r; try { r = await api('/api/doctor', { method:'POST', body: JSON.stringify({ text, hand_size:+$('handSize').value, ai: $('doctorAi').checked }) }); }
+  catch(e) { $('doctorResult').innerHTML = `<div class="text-rose-400">${esc(e.message)}</div>`; return; }
+  S.doctorDeck = r.deck;
+  const col = {error:'text-rose-400', warn:'text-amber-300', suggest:'text-cyan-200', ok:'text-emerald-300'}, ico = {error:'⛔', warn:'⚠', suggest:'💡', ok:'✅'};
+  const sc = r.score >= 80 ? 'text-emerald-300' : r.score >= 55 ? 'text-amber-300' : 'text-rose-400';
+  $('doctorResult').innerHTML = `
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div class="glass rounded-xl p-3"><div class="text-xs text-slate-400">Deck-Score</div><div class="font-display text-3xl ${sc}">${r.score}</div></div>
+      <div class="glass rounded-xl p-3"><div class="text-xs text-slate-400">Erkannt als</div><div class="font-semibold">${esc(r.archetype)}</div><div class="text-[11px] text-slate-500">${r.sample_size} Vergleichslisten</div></div>
+      <div class="glass rounded-xl p-3"><div class="text-xs text-slate-400">Combo-Chance</div><div class="font-display text-2xl">${pct(r.analysis.p_combo)}</div></div>
+      <div class="glass rounded-xl p-3"><div class="text-xs text-slate-400">Brick-Risiko</div><div class="font-display text-2xl text-rose-300">${pct(r.analysis.tiers.Brick)}</div></div>
+    </div>
+    ${r.warnings.length ? `<div class="text-xs text-amber-300">${r.warnings.map(esc).join('<br>')}</div>`:''}
+    <ul class="space-y-1">${r.findings.map(f=>`<li class="${col[f.severity]}">${ico[f.severity]} ${esc(f.text)}</li>`).join('')}</ul>
+    <div class="grid grid-cols-6 sm:grid-cols-10 gap-2">${r.deck.main.map(c=>cardTile(c)).join('')}</div>
+    ${r.ai ? `<div class="glass rounded-xl p-3"><div class="font-display text-xs tracking-widest text-amber-300 mb-1">KI-COACH</div><div class="whitespace-pre-line text-slate-200">${esc(r.ai)}</div></div>` : ''}
+    <button onclick="pickArch(${esc(JSON.stringify(r.archetype))});closeModal('doctorModal')" class="btn px-4 py-2 rounded-lg bg-cyan-500/20 border border-neon text-sm">→ Optimierte ${esc(r.archetype)}-Liste zum Vergleich bauen</button>`;
+}
+
+// ===================================================================
+// Boot
+// ===================================================================
+(async function boot() {
+  await loadStatus(); await loadTierlist();
+  setInterval(async () => { const before = S.status?.last_update; await loadStatus(); if (S.status?.last_update !== before) loadTierlist(); }, 60_000);
+  // Während des allerersten Refreshs schneller nachfragen
+  const fast = setInterval(async () => { if (S.tiers.length) return clearInterval(fast); await loadStatus(); await loadTierlist(); }, 5000);
+})();
+</script>
+</body>
+</html>

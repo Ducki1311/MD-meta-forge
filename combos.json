@@ -1,0 +1,14 @@
+{
+  "_hinweis": "Optional: Eigene, verifizierte Kombos je Archetyp (Name exakt wie in der Tier-Liste). Hat Vorrang vor dem Auto-Gerüst.",
+  "Beispiel-Archetyp": {
+    "turn1": [
+      "Normalbeschwörung Starter A → sucht Karte B",
+      "Karte B aktivieren → Spezialbeschwörung C aus dem Deck",
+      "A + C → Link-Beschwörung D"
+    ],
+    "chokepoints": [
+      "Ash auf Starter A ist der größte Chokepoint – Called by the Grave dafür aufheben"
+    ],
+    "notes": "Gegen Maxx C nach Schritt 2 stoppen."
+  }
+}

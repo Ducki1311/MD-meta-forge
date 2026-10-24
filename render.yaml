@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: md-meta-forge
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: REFRESH_TOKEN
+        generateValue: true
+      - key: REFRESH_HOURS
+        value: "6"
+      - key: META_WINDOW_DAYS
+        value: "30"
+      - key: ANTHROPIC_API_KEY
+        sync: false
