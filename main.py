@@ -276,47 +276,66 @@ async def fetch_ygo_cards(client: httpx.AsyncClient, *, names: list[str] | None 
     return found
 
 
+_i18n_misses: dict[tuple[int, str], float] = {}   # (id, Sprache) → Zeitpunkt der letzten erfolglosen Suche
+I18N_RETRY_S = 6 * 3600                               # fehlende Übersetzungen alle 6 h erneut versuchen
+
+
 async def card_translations(ids: list[int], lang: str) -> dict[int, dict]:
-    """Übersetzte Namen/Texte (YGOPRODeck language=de/fr/it/pt), dauerhaft im Cache.
-    Karten ohne Übersetzung werden als leer gemerkt und fallen im Frontend auf Englisch zurück."""
+    """Übersetzte Namen/Texte (YGOPRODeck language=de/fr/it/pt).
+    Gefundene Übersetzungen werden dauerhaft gecacht. Karten, die YGOPRODeck (noch) nicht übersetzt hat,
+    fallen im Frontend auf Englisch zurück und werden nach I18N_RETRY_S erneut abgefragt.
+    Netzwerk-/Serverfehler zählen NICHT als "keine Übersetzung"."""
     ids = sorted({int(i) for i in ids if int(i) > 0})
     if lang not in CARD_LANGS or not ids:
         return {}
     out: dict[int, dict] = {}
-    known: set[int] = set()
     with _db_lock, db() as c:
         for i in range(0, len(ids), 500):
             chunk = ids[i:i + 500]
             q = f"SELECT id, name, desc FROM cards_i18n WHERE lang=? AND id IN ({','.join('?' * len(chunk))})"
             for cid, name, desc in c.execute(q, [lang, *chunk]):
-                known.add(cid)
                 if name:
                     out[cid] = {"name": name, "desc": desc}
-    missing = [i for i in ids if i not in known]
-    if missing:
-        fetched: dict[int, dict] = {}
+    now = time.time()
+    missing = [i for i in ids if i not in out and now - _i18n_misses.get((i, lang), 0) > I18N_RETRY_S]
+    if not missing:
+        return out
+    fetched: dict[int, dict] = {}
+    answered: set[int] = set()   # IDs, zu denen YGOPRODeck eine gültige Antwort gegeben hat
 
-        async def batch(client: httpx.AsyncClient, vals: list[int]) -> None:
-            r = await ygo_get(client, YGO_API, {"id": ",".join(map(str, vals)), "language": lang})
-            if r.status_code == 200:
-                for x in r.json().get("data", []):
-                    fetched[int(x["id"])] = {"name": x.get("name"), "desc": x.get("desc")}
-            elif r.status_code == 400 and len(vals) > 1:
+    async def batch(client: httpx.AsyncClient, vals: list[int], attempt: int = 0) -> None:
+        r = await ygo_get(client, YGO_API, {"id": ",".join(map(str, vals)), "language": lang})
+        if r.status_code == 200:
+            answered.update(vals)
+            for x in r.json().get("data", []):
+                if x.get("name"):
+                    fetched[int(x["id"])] = {"name": x["name"], "desc": x.get("desc")}
+        elif r.status_code == 400:            # "keine Karte gefunden" → aufteilen bzw. als fehlend merken
+            if len(vals) > 1:
                 mid = len(vals) // 2
                 await batch(client, vals[:mid])
                 await batch(client, vals[mid:])
+            else:
+                answered.update(vals)
+        elif attempt < 2:                     # 429/5xx: kurz warten, erneut versuchen
+            await asyncio.sleep(1.5 * (attempt + 1))
+            await batch(client, vals, attempt + 1)
+        else:
+            log.warning("Übersetzung %s: HTTP %s", lang, r.status_code)
 
-        try:
-            async with httpx.AsyncClient(timeout=60, headers={"User-Agent": USER_AGENT}) as client:
-                for i in range(0, len(missing), 40):
-                    await batch(client, missing[i:i + 40])
-        except Exception as ex:  # noqa: BLE001
-            log.warning("Übersetzungen nicht abrufbar: %r", ex)
-            return out  # nichts als "fehlend" merken, beim nächsten Mal erneut versuchen
+    try:
+        async with httpx.AsyncClient(timeout=60, headers={"User-Agent": USER_AGENT}) as client:
+            for i in range(0, len(missing), 40):
+                await batch(client, missing[i:i + 40])
+    except Exception as ex:  # noqa: BLE001
+        log.warning("Übersetzungen nicht abrufbar: %r", ex)
+    if fetched:
         with _db_lock, db() as c:
             c.executemany("INSERT OR REPLACE INTO cards_i18n VALUES (?,?,?,?)",
-                          [(i, lang, fetched.get(i, {}).get("name"), fetched.get(i, {}).get("desc")) for i in missing])
-        out.update({i: v for i, v in fetched.items() if v.get("name")})
+                          [(i, lang, v["name"], v["desc"]) for i, v in fetched.items()])
+    for i in answered - set(fetched):
+        _i18n_misses[(i, lang)] = now
+    out.update(fetched)
     return out
 
 
@@ -817,6 +836,7 @@ def build_deck(req: BuildRequest) -> dict:
         "meta_avg_handtraps": round(hand_avg, 1),
         "role_counts": dict(Counter(c["role"] for c in main_out for _ in range(c["count"]))),
         "cp": cp_usage(main, extra, info), "changes": changes,
+        "refs": {n: info[n]["id"] for ch in changes for n in (ch.get("out"), ch.get("in")) if n and n in info},
         "sources": [{"event": d["event"], "created": d["created"][:10], "url": d["url"]} for d in arch_decks[:12]],
     }
 
@@ -1138,12 +1158,12 @@ async def deck_doctor(req: DoctorRequest) -> dict:
             add("error", L(lg, f"{n}: {c} Kopien, erlaubt sind {cap} (Banliste/Regel).", f"{n}: {c} copies, {cap} allowed (banlist/rules)."))
     if analysis["p_combo"] < 0.85:
         need = min_starters(0.85, max(size, 40), req.hand_size)
-        add("warn", L(lg, f"Combo-Chance nur {analysis['p_combo']:.1%} – für 85 % (1-Karten-Starter) werden ca. "
+        add("warn", L(lg, f"Combo-Chance nur {fmt_pct(analysis['p_combo'], 'de')} – für 85 % (1-Karten-Starter) werden ca. "
                           f"{need} Starter bei {max(size, 40)} Karten benötigt, aktuell {counts['starter']}.",
                           f"Combo odds only {analysis['p_combo']:.1%} – 85 % (1-card starters) needs about "
                           f"{need} starters in {max(size, 40)} cards, you have {counts['starter']}."))
     else:
-        add("ok", L(lg, f"Combo-Chance {analysis['p_combo']:.1%} – Konsistenzziel erreicht.",
+        add("ok", L(lg, f"Combo-Chance {fmt_pct(analysis['p_combo'], 'de')} – Konsistenzziel erreicht.",
                     f"Combo odds {analysis['p_combo']:.1%} – consistency target reached."))
 
     plus = [(n, s) for n, s in sorted(st.items(), key=lambda x: -x[1]["inclusion"] * x[1]["median"])
@@ -1182,6 +1202,7 @@ async def deck_doctor(req: DoctorRequest) -> dict:
     return {"archetype": arche, "sample_size": len(arch_decks), "main_size": size,
             "analysis": analysis, "findings": findings, "score": score,
             "warnings": warnings, "ai": ai_text,
+            "refs": {n: info[n]["id"] for n in set(st) | set(main) | set(extra) if n in info and info[n].get("id")},
             "deck": {"main": [{"name": n, "count": c, "id": info.get(n, {}).get("id", 0),
                                "role": role(n), "rarity": info.get(n, {}).get("rarity", "?"),
                                "desc": info.get(n, {}).get("desc", ""), "type": info.get(n, {}).get("type", "")}

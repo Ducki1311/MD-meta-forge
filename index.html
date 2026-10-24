@@ -321,7 +321,8 @@ de: {
   needDeck:'Bitte zuerst eine Deckliste einfügen', analyzing:'Analysiere…', analyzingAi:'Analysiere (inkl. KI, ~30 s)…',
   score:'Deck-Score', detected:'Erkannt als', refLists:'{n} Vergleichslisten', brickRisk:'Brick-Risiko', aiCoach:'KI-COACH',
   compare:'→ Optimierte {a}-Liste zum Vergleich bauen', shareDoctor:'🔗 Dieses Deck teilen', aiOff:'ANTHROPIC_API_KEY nicht gesetzt',
-  shared404:'Geteilter Link ist ungültig.', loadingShared:'Lade geteiltes Deck…'
+  shared404:'Geteilter Link ist ungültig.', loadingShared:'Lade geteiltes Deck…',
+  noTranslation:'Noch keine deutsche Übersetzung bei YGOPRODeck – englischer Originaltext'
 },
 en: {
   doctor:'Deck Doctor', tierlist:'TIER LIST', searchArch:'Search archetype…',
@@ -382,11 +383,12 @@ en: {
   needDeck:'Please paste a decklist first', analyzing:'Analysing…', analyzingAi:'Analysing (incl. AI, ~30 s)…',
   score:'Deck score', detected:'Detected as', refLists:'{n} reference lists', brickRisk:'Brick risk', aiCoach:'AI COACH',
   compare:'→ Build optimised {a} list to compare', shareDoctor:'🔗 Share this deck', aiOff:'ANTHROPIC_API_KEY not set',
-  shared404:'Shared link is invalid.', loadingShared:'Loading shared deck…'
+  shared404:'Shared link is invalid.', loadingShared:'Loading shared deck…',
+  noTranslation:'No translation available yet'
 }};
 
 const ROLE_COLORS = { starter:'#22d3ee', extender:'#34d399', handtrap:'#a855f7', breaker:'#f43f5e', engine:'#94a3b8', draw:'#f5c542', tech:'#fb923c', extra:'#64748b' };
-const S = { lang:'de', status:null, tiers:[], deck:null, overrides:{}, charts:{}, draws:{S:0,A:0,B:0,Brick:0}, tr:{}, pb:null };
+const S = { lang:'de', status:null, tiers:[], deck:null, overrides:{}, charts:{}, draws:{S:0,A:0,B:0,Brick:0}, tr:{}, pb:null, refs:{} };
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const store = { get(k){ try { return localStorage.getItem(k) } catch { return null } }, set(k,v){ try { localStorage.setItem(k,v) } catch {} }, del(k){ try { localStorage.removeItem(k) } catch {} } };
@@ -398,7 +400,19 @@ const roleName = r => t('roles')[r] || r;
 // Lokalisierte Kartennamen/-texte (Englisch bleibt intern für Export & Kombo-Analyse)
 const lname = c => (S.lang !== 'en' && S.tr[S.lang]?.[c.id]?.name) || c.name;
 const ldesc = c => (S.lang !== 'en' && S.tr[S.lang]?.[c.id]?.desc) || c.desc;
-function nameByEn(en) { const c = allCards().find(x => x.name === en); return c ? lname(c) : en; }
+function nameByEn(en) {
+  const c = allCards().find(x => x.name === en); if (c) return lname(c);
+  const id = S.refs[en]; return (S.lang !== 'en' && id && S.tr[S.lang]?.[id]?.name) || en;
+}
+const hasLocal = c => S.lang === 'en' || !c.id || !!S.tr[S.lang]?.[c.id]?.name;
+// Englische Kartennamen in Fließtexten (Guide, Deck Doctor) durch die Übersetzung ersetzen
+function localizeText(text) {
+  if (S.lang === 'en' || !text) return text;
+  const names = [...new Set(allCards().map(c => c.name).concat(Object.keys(S.refs)))].sort((a,b) => b.length - a.length);
+  let out = text;
+  for (const n of names) { const l = nameByEn(n); if (l !== n && out.includes(n)) out = out.split(n).join(l); }
+  return out;
+}
 function allCards() { return [...(S.deck?.main||[]), ...(S.deck?.extra||[]), ...(S.doctorDeck?.main||[]), ...(S.doctorDeck?.extra||[])]; }
 
 async function api(path, opts={}) {
@@ -410,10 +424,11 @@ function toast(msg, ms=2600) { const el=$('toast'); el.textContent=msg; el.class
 function openModal(id){ $(id).classList.remove('hidden') } function closeModal(id){ $(id).classList.add('hidden') }
 document.addEventListener('keydown', e => { if (e.key==='Escape') ['playbookModal','doctorModal','helpModal','editorModal','shareModal'].forEach(closeModal) });
 
-async function loadTranslations(cards) {
+async function loadTranslations(cards, refs = {}) {
+  Object.assign(S.refs, refs);
   if (S.lang === 'en') return;
   const cache = S.tr[S.lang] ||= {};
-  const ids = [...new Set(cards.map(c => c.id).filter(id => id && !(id in cache)))];
+  const ids = [...new Set(cards.map(c => c.id).concat(Object.values(S.refs)).filter(id => id && !(id in cache)))];
   for (let i = 0; i < ids.length; i += 200) {
     try { const res = await api('/api/i18n', { method:'POST', body: JSON.stringify({ lang:S.lang, ids: ids.slice(i, i+200) }) });
       ids.slice(i, i+200).forEach(id => cache[id] = res[id] || null); } catch {}
@@ -436,6 +451,7 @@ function applyStatic() {
 async function setLang(lang) {
   S.lang = lang; store.set('lang', lang); applyStatic(); renderStatus(); renderTierlist();
   if (S.deck) { await loadTranslations(S.deck.main.concat(S.deck.extra)); renderDeck(); renderAnalysis(S.deck.analysis); renderChanges(); }
+  if (S.doctorResult && !$('doctorModal').classList.contains('hidden')) { await loadTranslations(S.doctorDeck.main.concat(S.doctorDeck.extra)); renderDoctor(); }
   if (!$('playbookModal').classList.contains('hidden')) openPlaybook();
 }
 
@@ -496,7 +512,7 @@ async function buildDeck() {
 }
 async function showDeck(deck) {
   S.deck = deck; S.pb = null;
-  await loadTranslations(deck.main.concat(deck.extra));
+  await loadTranslations(deck.main.concat(deck.extra), deck.refs || {});
   S.draws = {S:0,A:0,B:0,Brick:0}; $('hand').innerHTML=''; $('handTier').textContent=''; $('drawStats').textContent='';
   $('emptyState').classList.add('hidden'); $('deckArea').classList.remove('hidden');
   $('sharedBanner').classList.toggle('hidden', !deck.shared); $('changesBox').classList.toggle('hidden', !!deck.shared);
@@ -512,6 +528,7 @@ function cardTile(c, opts={}) {
     ${img}
     ${c.count>1 && !opts.hideCount ? `<span class="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-void border border-neon text-[11px] font-bold grid place-items-center">${c.count}</span>`:''}
     <span class="absolute top-1 left-1 text-[9px] font-extrabold px-1 rounded badge-${esc(c.rarity)}">${esc(c.rarity)}</span>
+    ${hasLocal(c) ? '' : `<span class="absolute top-1 right-1 text-[8px] font-bold px-1 rounded bg-slate-900/90 border border-slate-500 text-slate-300" title="${esc(t('noTranslation'))}">EN</span>`}
     <span class="absolute bottom-0 inset-x-0 text-[9px] text-center font-semibold rounded-b-md py-0.5" style="background:${col}cc;color:#030712">${esc(roleName(c.role))}</span>
   </div>`;
 }
@@ -594,6 +611,7 @@ function showTip(ev, el) {
   if (c.ban != null) meta.push(`<span class="text-rose-400">${esc(t('limit', {n:c.ban}))}</span>`);
   $('tooltip').innerHTML = `<div class="flex items-center gap-2 mb-1"><b class="text-sm text-white">${esc(lname(c))}</b><span class="ml-auto text-[10px] px-1.5 rounded font-bold badge-${esc(c.rarity)}">${esc(c.rarity)}</span></div>
     ${lname(c) !== c.name ? `<div class="text-[10px] text-slate-500 -mt-0.5 mb-1">${esc(c.name)}</div>` : ''}
+    ${hasLocal(c) ? '' : `<div class="text-[10px] text-amber-300 mb-1">${esc(t('noTranslation'))}</div>`}
     <div class="text-[10px] text-slate-400 mb-1">${meta.join(' · ')}</div>
     <div class="text-slate-200 whitespace-pre-line leading-snug">${esc(ldesc(c) || t('noText'))}</div>`;
   $('tooltip').classList.remove('hidden'); moveTip(ev);
@@ -707,8 +725,8 @@ function renderPlaybook() {
       <button onclick="openEditor()" class="btn ml-auto px-3 py-1.5 rounded-lg bg-amber-400/20 border border-amber-400/70 text-xs font-semibold">${esc(t('editGuide'))}</button>
     </div>
     <section><h3 class="font-display text-xs tracking-widest text-neon mb-2">${esc(t('turn1'))}</h3>
-      <ol class="space-y-2">${steps.map((s,i)=>`<li class="flex gap-3"><span class="shrink-0 w-6 h-6 rounded-full bg-cyan-500/20 border border-neon grid place-items-center text-xs font-bold">${i+1}</span><span>${esc(s.text)}</span></li>`).join('')}</ol>
-      ${notes ? `<p class="mt-2 text-xs text-slate-300">📝 ${esc(notes)}</p>` : ''}</section>
+      <ol class="space-y-2">${steps.map((s,i)=>`<li class="flex gap-3"><span class="shrink-0 w-6 h-6 rounded-full bg-cyan-500/20 border border-neon grid place-items-center text-xs font-bold">${i+1}</span><span>${esc(localizeText(s.text))}</span></li>`).join('')}</ol>
+      ${notes ? `<p class="mt-2 text-xs text-slate-300">📝 ${esc(localizeText(notes))}</p>` : ''}</section>
     <section><h3 class="font-display text-xs tracking-widest text-emerald-300 mb-1">${esc(t('tree'))}</h3>
       <p class="text-[11px] text-slate-500 mb-2">${esc(t('treeHint'))}</p>
       ${pb.graph.length ? `<div class="grid sm:grid-cols-2 gap-3">${pb.graph.map(g => `<div class="tree rounded-xl bg-slate-950/60 border border-slate-800 p-3">
@@ -716,7 +734,7 @@ function renderPlaybook() {
         : `<p class="text-xs text-slate-400">${esc(t('treeNone'))}</p>`}</section>
     <section><h3 class="font-display text-xs tracking-widest text-violet mb-2">${esc(t('chokes'))}</h3>
       <div class="overflow-x-auto"><table class="w-full text-xs"><thead class="text-slate-400"><tr><th class="text-left py-1">${esc(t('card'))}</th><th>Ash</th><th>Imperm/Veiler</th><th class="text-left">${esc(t('hint'))}</th></tr></thead>
-      <tbody>${chokes.map(c=>`<tr class="border-t border-slate-800"><td class="py-1.5 pr-2 font-semibold">${esc(c.card ? nameByEn(c.card) : t('curated'))}</td><td class="text-center">${c.ash==null?'–':c.ash?yes:no}</td><td class="text-center">${c.imperm==null?'–':c.imperm?yes:no}</td><td class="text-slate-300">${esc(c.tip)}</td></tr>`).join('')}</tbody></table></div>
+      <tbody>${chokes.map(c=>`<tr class="border-t border-slate-800"><td class="py-1.5 pr-2 font-semibold">${esc(c.card ? nameByEn(c.card) : t('curated'))}</td><td class="text-center">${c.ash==null?'–':c.ash?yes:no}</td><td class="text-center">${c.imperm==null?'–':c.imperm?yes:no}</td><td class="text-slate-300">${esc(localizeText(c.tip))}</td></tr>`).join('')}</tbody></table></div>
       <p class="mt-2 text-xs">${esc(t('protection'))}${pb.protection_in_deck.length ? pb.protection_in_deck.map(n => esc(nameByEn(n))).join(', ') : `<span class="text-rose-300">${esc(t('noProtection'))}</span>`}</p>
       <p class="mt-1 text-xs text-slate-300">${esc(pb.maxx_c.text)}</p></section>
     <section><h3 class="font-display text-xs tracking-widest text-amber-300 mb-2">${esc(t('moreGuides'))}</h3>
@@ -761,7 +779,11 @@ async function runDoctor() {
   $('doctorResult').innerHTML = `<div class="text-slate-400">${esc($('doctorAi').checked ? t('analyzingAi') : t('analyzing'))}</div>`;
   let r; try { r = await api('/api/doctor', { method:'POST', body: JSON.stringify({ text, hand_size:+$('handSize').value, ai: $('doctorAi').checked, lang:S.lang }) }); }
   catch(e) { $('doctorResult').innerHTML = `<div class="text-rose-400">${esc(e.message)}</div>`; return; }
-  S.doctorDeck = r.deck; S.doctorResult = r; await loadTranslations(r.deck.main.concat(r.deck.extra));
+  S.doctorDeck = r.deck; S.doctorResult = r; await loadTranslations(r.deck.main.concat(r.deck.extra), r.refs || {});
+  renderDoctor();
+}
+function renderDoctor() {
+  const r = S.doctorResult;
   const col = {error:'text-rose-400', warn:'text-amber-300', suggest:'text-cyan-200', ok:'text-emerald-300'}, ico = {error:'⛔', warn:'⚠', suggest:'💡', ok:'✅'};
   const sc = r.score >= 80 ? 'text-emerald-300' : r.score >= 55 ? 'text-amber-300' : 'text-rose-400';
   $('doctorResult').innerHTML = `
@@ -772,7 +794,7 @@ async function runDoctor() {
       <div class="glass rounded-xl p-3"><div class="text-xs text-slate-400">${esc(t('brickRisk'))}</div><div class="font-display text-2xl text-rose-300">${pct(r.analysis.tiers.Brick)}</div></div>
     </div>
     ${r.warnings.length ? `<div class="text-xs text-amber-300">${r.warnings.map(esc).join('<br>')}</div>`:''}
-    <ul class="space-y-1">${r.findings.map(f=>`<li class="${col[f.severity]}">${ico[f.severity]} ${esc(f.text)}</li>`).join('')}</ul>
+    <ul class="space-y-1">${r.findings.map(f=>`<li class="${col[f.severity]}">${ico[f.severity]} ${esc(localizeText(f.text))}</li>`).join('')}</ul>
     <div class="grid grid-cols-6 sm:grid-cols-10 gap-2">${r.deck.main.map(c=>cardTile(c)).join('')}</div>
     ${r.ai ? `<div class="glass rounded-xl p-3"><div class="font-display text-xs tracking-widest text-amber-300 mb-1">${esc(t('aiCoach'))}</div><div class="whitespace-pre-line text-slate-200">${esc(r.ai)}</div></div>` : ''}
     <div class="flex flex-wrap gap-2">
